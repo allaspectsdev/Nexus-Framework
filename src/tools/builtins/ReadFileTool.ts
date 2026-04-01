@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { readFile } from 'fs/promises'
-import { resolve } from 'path'
 import type { ToolDefinition } from '../Tool.js'
+import { assertWithinRoot } from '../../utils/pathSecurity.js'
 
 const inputSchema = z.object({
   file_path: z.string().describe('Absolute path to the file to read'),
@@ -17,7 +17,7 @@ export const ReadFileTool: ToolDefinition<z.infer<typeof inputSchema>> = {
 
   async call(input) {
     try {
-      const filePath = resolve(input.file_path)
+      const filePath = assertWithinRoot(input.file_path)
       const content = await readFile(filePath, 'utf-8')
       let lines = content.split('\n')
 

@@ -17,22 +17,25 @@ export function createDashboardServer(
   const app = new Hono()
 
   // Serve static files using absolute path
-  app.use('/static/*', serveStatic({ root: resolve(__dirname, '..', '..') + '/src/dashboard/' }))
+  app.use('/static/*', serveStatic({ root: STATIC_DIR }))
 
   // SSE endpoint — push events to the dashboard in real time
   app.get('/events', (c) => {
+    let closed = false
+    let heartbeat: ReturnType<typeof setInterval> | undefined
+    let unsubscribe: (() => void) | undefined
+
+    function cleanup() {
+      if (closed) return
+      closed = true
+      if (heartbeat) clearInterval(heartbeat)
+      unsubscribe?.()
+    }
+
     return c.newResponse(
       new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder()
-          let closed = false
-
-          function cleanup() {
-            if (closed) return
-            closed = true
-            clearInterval(heartbeat)
-            unsubscribe()
-          }
 
           // Send initial metrics snapshot
           const initial = JSON.stringify({
@@ -45,7 +48,7 @@ export function createDashboardServer(
           controller.enqueue(encoder.encode(`data: ${initial}\n\n`))
 
           // Subscribe to live events
-          const unsubscribe = eventBus.on((event) => {
+          unsubscribe = eventBus.on((event) => {
             if (closed) return
             try {
               const data = JSON.stringify({
@@ -58,12 +61,12 @@ export function createDashboardServer(
               })
               controller.enqueue(encoder.encode(`data: ${data}\n\n`))
             } catch {
-              cleanup() // Fix: clean up on enqueue failure too
+              cleanup()
             }
           })
 
           // Send heartbeat every 15s
-          const heartbeat = setInterval(() => {
+          heartbeat = setInterval(() => {
             if (closed) return
             try {
               controller.enqueue(encoder.encode(`: heartbeat\n\n`))
@@ -72,13 +75,15 @@ export function createDashboardServer(
             }
           }, 15_000)
         },
+        cancel() {
+          cleanup()
+        },
       }),
       {
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
-          'Access-Control-Allow-Origin': '*',
         },
       },
     )

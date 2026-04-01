@@ -45,8 +45,8 @@ function addCacheBreakpoints(messages: APIMessage[]): APIMessage[] {
   return result
 }
 
-// Models that support extended thinking
-const THINKING_MODELS = /claude-(sonnet-4|opus-4)/i
+// Models that support extended thinking (4.x and 4.6.x families)
+const THINKING_MODELS = /claude-(sonnet|opus)-4/i
 
 function supportsThinking(model: string): boolean {
   return THINKING_MODELS.test(model)

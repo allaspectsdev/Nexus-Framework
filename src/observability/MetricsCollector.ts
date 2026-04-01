@@ -31,7 +31,7 @@ export function createMetricsCollector(eventBus: EventBus) {
   const recentEvents: Array<MetricEvent & { timestamp: number }> = []
   const MAX_RECENT = 200
 
-  eventBus.on((event) => {
+  const unsubscribe = eventBus.on((event) => {
     recentEvents.push({ ...event, timestamp: Date.now() })
     if (recentEvents.length > MAX_RECENT) recentEvents.shift()
 
@@ -82,21 +82,31 @@ export function createMetricsCollector(eventBus: EventBus) {
 
     /** Calculate estimated savings vs. sending everything to Claude. */
     getSavings(): { tokensSaved: number; costSaved: number; percentSaved: number } {
-      const localTokens = metrics.local.inputTokens + metrics.local.outputTokens
-      // If these had gone to Claude instead:
-      const hypotheticalCost = (localTokens / 1_000_000) * PRICING.claude.input
+      // If local tokens had gone to Claude instead (split by input/output pricing):
+      const hypotheticalInputCost = (metrics.local.inputTokens / 1_000_000) * PRICING.claude.input
+      const hypotheticalOutputCost = (metrics.local.outputTokens / 1_000_000) * PRICING.claude.output
+      const hypotheticalCost = hypotheticalInputCost + hypotheticalOutputCost
+
+      // Context decay saves future input tokens (decayed content is not re-sent)
+      const decaySavings = (metrics.context.tokensSaved / 1_000_000) * PRICING.claude.input
+
       const actualCost = metrics.claude.cost + metrics.local.cost
-      const totalCost = hypotheticalCost + metrics.claude.cost
+      const totalCost = hypotheticalCost + decaySavings + metrics.claude.cost
 
       return {
-        tokensSaved: metrics.context.tokensSaved + localTokens,
-        costSaved: hypotheticalCost + (metrics.context.tokensSaved / 1_000_000 * PRICING.claude.input),
+        tokensSaved: metrics.context.tokensSaved + metrics.local.inputTokens + metrics.local.outputTokens,
+        costSaved: hypotheticalCost + decaySavings,
         percentSaved: totalCost > 0 ? ((totalCost - actualCost) / totalCost) * 100 : 0,
       }
     },
 
     getUptime(): number {
       return Date.now() - metrics.startedAt
+    },
+
+    /** Unsubscribe from EventBus to prevent listener leaks. */
+    destroy(): void {
+      unsubscribe()
     },
   }
 }

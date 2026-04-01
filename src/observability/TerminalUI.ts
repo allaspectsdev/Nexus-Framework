@@ -89,7 +89,7 @@ export function createTerminalUI(eventBus: EventBus, metricsCollector: MetricsCo
   }
 
   // Subscribe to streaming text for live output
-  eventBus.on((event) => {
+  const unsubscribe = eventBus.on((event) => {
     if (event.type === 'stream_text') {
       isStreaming = true
       process.stdout.write(event.text)
@@ -124,6 +124,11 @@ export function createTerminalUI(eventBus: EventBus, metricsCollector: MetricsCo
     clear(): void {
       clearLines(lastLineCount)
       lastLineCount = 0
+    },
+
+    /** Unsubscribe from EventBus to prevent listener leaks. */
+    destroy(): void {
+      unsubscribe()
     },
   }
 }

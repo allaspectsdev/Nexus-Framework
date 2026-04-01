@@ -51,6 +51,7 @@ export function createAgentRegistry() {
     kill(id: AgentId): void {
       const agent = agents.get(id)
       if (agent && (agent.status === 'running' || agent.status === 'pending')) {
+        agent.controller?.abort(new Error('Agent killed'))
         agent.status = 'killed'
         agent.completedAt = Date.now()
       }

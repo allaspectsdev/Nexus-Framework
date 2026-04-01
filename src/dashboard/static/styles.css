@@ -188,6 +188,17 @@ canvas { width: 100%; height: auto; }
 .timeline .agent-dot.completed { background: var(--success); }
 .timeline .agent-dot.failed { background: var(--error); }
 
+.timeline .agent-name {
+  color: var(--text);
+  font-weight: 600;
+  min-width: 80px;
+}
+.timeline .agent-status {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.timeline .agent-dot.killed { background: var(--claude); }
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }

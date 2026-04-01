@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import { writeFile, mkdir } from 'fs/promises'
-import { resolve, dirname } from 'path'
+import { dirname } from 'path'
 import type { ToolDefinition } from '../Tool.js'
+import { assertWithinRoot } from '../../utils/pathSecurity.js'
 
 const inputSchema = z.object({
   file_path: z.string().describe('Absolute path to the file to write'),
@@ -16,7 +17,7 @@ export const WriteFileTool: ToolDefinition<z.infer<typeof inputSchema>> = {
 
   async call(input) {
     try {
-      const filePath = resolve(input.file_path)
+      const filePath = assertWithinRoot(input.file_path)
       await mkdir(dirname(filePath), { recursive: true })
       await writeFile(filePath, input.content, 'utf-8')
       return { content: `File written successfully: ${filePath}` }

@@ -5,6 +5,9 @@ const tokenHistory = { claude: [], local: [], cached: [] }
 const MAX_HISTORY = 60
 let canvas, ctx
 
+// Agent timeline state
+const agentStates = new Map() // agentId -> { name, status, startedAt, durationMs }
+
 function formatTokens(n) {
   if (n < 1000) return String(n)
   if (n < 100000) return (n / 1000).toFixed(1) + 'K'
@@ -45,7 +48,7 @@ function updateMetrics(data) {
   $('#savings-tokens').textContent = formatTokens(s.tokensSaved) + ' tokens recovered'
 
   // Agents
-  $('#agents-active').textContent = m.agents.spawned - m.agents.completed - m.agents.failed
+  $('#agents-active').textContent = Math.max(0, m.agents.spawned - m.agents.completed - m.agents.failed)
   $('#agents-completed').textContent = m.agents.completed
   $('#agents-failed').textContent = m.agents.failed
 
@@ -155,20 +158,78 @@ function addEventLog(event, timestamp) {
       detail = JSON.stringify(event).slice(0, 100)
   }
 
-  el.innerHTML = `<span class="time">${time}</span><span class="type">${event.type}</span><span class="detail">${detail}</span>`
+  const timeSpan = document.createElement('span')
+  timeSpan.className = 'time'
+  timeSpan.textContent = time
+  const typeSpan = document.createElement('span')
+  typeSpan.className = 'type'
+  typeSpan.textContent = event.type
+  const detailSpan = document.createElement('span')
+  detailSpan.className = 'detail'
+  detailSpan.textContent = detail
+  el.appendChild(timeSpan)
+  el.appendChild(typeSpan)
+  el.appendChild(detailSpan)
   log.insertBefore(el, log.firstChild)
 
   // Keep log manageable
   while (log.children.length > 100) log.removeChild(log.lastChild)
 }
 
+// --- Agent Timeline ---
+
+function updateAgentTimeline(event) {
+  if (event.type !== 'agent_lifecycle') return
+
+  const id = event.agentId
+  let agent = agentStates.get(id)
+  if (!agent) {
+    agent = { name: event.name, status: event.status, startedAt: Date.now(), durationMs: 0 }
+    agentStates.set(id, agent)
+  }
+  agent.status = event.status
+  if (event.durationMs) agent.durationMs = event.durationMs
+
+  renderTimeline()
+}
+
+function renderTimeline() {
+  const timeline = $('#agent-timeline')
+  timeline.innerHTML = ''
+
+  for (const [, agent] of agentStates) {
+    const entry = document.createElement('div')
+    entry.className = 'agent-entry'
+
+    const dot = document.createElement('span')
+    dot.className = `agent-dot ${agent.status}`
+
+    const nameEl = document.createElement('span')
+    nameEl.className = 'agent-name'
+    nameEl.textContent = agent.name
+
+    const statusEl = document.createElement('span')
+    statusEl.className = 'agent-status'
+    const duration = agent.durationMs ? ` (${formatDuration(agent.durationMs)})` : agent.status === 'running' ? ` (${formatDuration(Date.now() - agent.startedAt)})` : ''
+    statusEl.textContent = agent.status + duration
+
+    entry.appendChild(dot)
+    entry.appendChild(nameEl)
+    entry.appendChild(statusEl)
+    timeline.appendChild(entry)
+  }
+}
+
 // --- SSE Connection ---
+
+let reconnectDelay = 1000
 
 function connect() {
   const evtSource = new EventSource('/events')
 
   evtSource.onopen = () => {
     $('#status').classList.remove('disconnected')
+    reconnectDelay = 1000 // Reset backoff on successful connect
   }
 
   evtSource.onmessage = (e) => {
@@ -177,13 +238,15 @@ function connect() {
 
       if (data.type === 'snapshot') {
         updateMetrics(data)
-        // Load recent events
+        // Load recent events and rebuild agent timeline
         for (const evt of data.recentEvents || []) {
           addEventLog(evt, evt.timestamp)
+          updateAgentTimeline(evt)
         }
       } else if (data.type === 'event') {
         updateMetrics(data)
         addEventLog(data.event, data.timestamp)
+        updateAgentTimeline(data.event)
       }
     } catch {}
   }
@@ -191,8 +254,9 @@ function connect() {
   evtSource.onerror = () => {
     $('#status').classList.add('disconnected')
     evtSource.close()
-    // Reconnect after 3s
-    setTimeout(connect, 3000)
+    // Exponential backoff with cap at 10s
+    setTimeout(connect, reconnectDelay)
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 10000)
   }
 }
 
@@ -200,7 +264,6 @@ function connect() {
 
 function initCanvas() {
   canvas = $('#token-chart')
-  // Wait for layout to complete before reading dimensions
   requestAnimationFrame(() => {
     const dpr = window.devicePixelRatio || 1
     const w = canvas.offsetWidth || 400
@@ -209,13 +272,29 @@ function initCanvas() {
     canvas.height = h * dpr
     ctx = canvas.getContext('2d')
     ctx.scale(dpr, dpr)
+    drawChart() // Draw immediately after init
   })
+}
+
+let resizeTimer
+function debouncedInitCanvas() {
+  clearTimeout(resizeTimer)
+  resizeTimer = setTimeout(initCanvas, 150)
 }
 
 window.addEventListener('DOMContentLoaded', () => {
   initCanvas()
   connect()
 
-  // Re-init canvas on resize
-  window.addEventListener('resize', initCanvas)
+  // Debounced resize handler prevents torn frames during drag
+  window.addEventListener('resize', debouncedInitCanvas)
+
+  // Update running agent durations every second
+  setInterval(() => {
+    let hasRunning = false
+    for (const [, agent] of agentStates) {
+      if (agent.status === 'running') { hasRunning = true; break }
+    }
+    if (hasRunning) renderTimeline()
+  }, 1000)
 })

@@ -55,6 +55,10 @@ export function createLocalModelClient(endpoint: string, defaultModel: string): 
       let buffer = ''
 
       while (true) {
+        if (options.signal?.aborted) {
+          reader.cancel()
+          break
+        }
         const { done, value } = await reader.read()
         if (done) break
 
@@ -101,8 +105,7 @@ export function createLocalModelClient(endpoint: string, defaultModel: string): 
     },
 
     async isAvailable(): Promise<boolean> {
-      // Only cache positive results; retry on failure (exo may start late)
-      if (available === true) return true
+      // Always re-check — exo cluster may start late or go down
       try {
         const resp = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(3000) })
         available = resp.ok

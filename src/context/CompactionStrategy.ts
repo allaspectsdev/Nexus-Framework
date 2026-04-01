@@ -5,6 +5,7 @@ import { estimateTokens, estimateMessageTokens } from '../utils/tokens.js'
 
 const MAX_CONTEXT_TOKENS = 150_000
 const COMPACT_THRESHOLD = 0.8 // Compact when context reaches 80% of max
+const SUMMARY_MARKER = '[Context Summary — earlier conversation compacted]'
 
 /**
  * Incremental compaction strategy.
@@ -36,8 +37,15 @@ export function createCompactionStrategy(
 
       // Keep the most recent 10 messages verbatim
       const keepCount = Math.min(10, messages.length)
-      const toCompact = messages.slice(0, messages.length - keepCount)
+      let toCompact = messages.slice(0, messages.length - keepCount)
       const toKeep = messages.slice(messages.length - keepCount)
+
+      // Skip already-compacted summary messages to avoid re-summarizing summaries
+      toCompact = toCompact.filter(m => {
+        if (m.role !== 'user' || m.content.length !== 1) return true
+        const block = m.content[0]
+        return !(block?.type === 'text' && block.text.startsWith(SUMMARY_MARKER))
+      })
 
       if (toCompact.length === 0) {
         return { messages, tokensSaved: 0 }
@@ -53,7 +61,7 @@ export function createCompactionStrategy(
           role: 'user',
           content: [{
             type: 'text',
-            text: `[Context Summary — earlier conversation compacted]\n\n${summaryText}`,
+            text: `${SUMMARY_MARKER}\n\n${summaryText}`,
           }],
           turn: 0,
         },

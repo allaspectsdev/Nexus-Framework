@@ -1,4 +1,4 @@
-import type { Message, ToolSchema } from '../engine/types.js'
+import type { Message, ToolSchema, StreamEvent } from '../engine/types.js'
 import type { Router } from '../routing/Router.js'
 import type { NexusConfig } from '../config.js'
 import type { ToolRegistry } from '../tools/ToolRegistry.js'
@@ -7,7 +7,6 @@ import { createAgentRegistry, type AgentRegistry } from './AgentRegistry.js'
 import { runWorker } from './Worker.js'
 import { notificationToMessage } from './notifications.js'
 import { queryLoop } from '../engine/QueryLoop.js'
-import type { StreamEvent } from '../engine/types.js'
 
 export type CoordinatorOptions = {
   task: string
@@ -51,8 +50,8 @@ export async function* runCoordinator(
 
   options.onEvent?.('coordinator_started', { task: options.task })
 
-  // Spawn workers based on the task
-  const workerDirectives = decomposeTask(options.task)
+  // Spawn workers based on the task (LLM-driven decomposition)
+  const workerDirectives = await decomposeTask(options.task, options.router, options.config, options.signal)
 
   for (const directive of workerDirectives) {
     const agent = registry.register(directive.name, directive.purpose)
@@ -125,25 +124,91 @@ export async function* runCoordinator(
   return { notifications }
 }
 
-/** Simple task decomposition — split a task into worker directives. */
-function decomposeTask(task: string): Array<{ name: string; purpose: string; instruction: string }> {
-  // For the demo, create 3 standard workers for codebase analysis tasks
+type WorkerDirective = { name: string; purpose: string; instruction: string }
+
+/**
+ * LLM-driven task decomposition — uses the router to generate task-appropriate worker directives.
+ * Falls back to heuristic decomposition if the LLM call fails.
+ */
+async function decomposeTask(
+  task: string,
+  router: Router,
+  config: NexusConfig,
+  signal?: AbortSignal,
+): Promise<WorkerDirective[]> {
+  try {
+    const decision = await router.route(
+      [{ role: 'user', content: [{ type: 'text', text: task }], turn: 0 }],
+      'classify',
+    )
+    const client = router.getClient(decision.provider)
+
+    const prompt = `Given this task, decompose it into 2-4 independent worker directives. Each worker should have a clear, non-overlapping scope.
+
+Task: ${task}
+
+Respond with a JSON array of objects, each with "name" (short lowercase identifier), "purpose" (one-line description), and "instruction" (detailed directive for the worker). Output ONLY the JSON array, nothing else.`
+
+    let response = ''
+    const stream = client.stream({
+      model: decision.model,
+      systemPrompt: 'You decompose tasks into parallel worker directives. Output only valid JSON.',
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], turn: 0 }],
+      tools: [],
+      maxTokens: 2000,
+      signal,
+    })
+
+    for await (const event of stream) {
+      if (event.type === 'text_delta') response += event.text
+    }
+
+    // Extract JSON from the response (handle markdown code blocks)
+    const jsonMatch = response.match(/\[[\s\S]*\]/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]) as Array<{ name: string; purpose: string; instruction: string }>
+      if (Array.isArray(parsed) && parsed.length >= 2 && parsed.length <= 4) {
+        return parsed.map(d => ({
+          name: String(d.name).toLowerCase().replace(/[^a-z0-9_-]/g, '_'),
+          purpose: String(d.purpose),
+          instruction: String(d.instruction),
+        }))
+      }
+    }
+  } catch {
+    // Fall through to heuristic decomposition
+  }
+
+  return heuristicDecompose(task)
+}
+
+/** Fallback heuristic decomposition based on task content. */
+function heuristicDecompose(task: string): WorkerDirective[] {
+  const lower = task.toLowerCase()
+
+  // Code-related tasks
+  if (/\b(code|implement|build|refactor|fix|debug)\b/.test(lower)) {
+    return [
+      { name: 'planner', purpose: 'Plan implementation approach', instruction: `${task}\n\nAnalyze the task requirements and existing code. Identify the files that need to be modified, the approach to take, and any potential issues.` },
+      { name: 'implementer', purpose: 'Write the code changes', instruction: `${task}\n\nFocus on implementing the required changes. Write clean, well-structured code that follows the project's existing patterns.` },
+      { name: 'validator', purpose: 'Validate and review changes', instruction: `${task}\n\nReview the implementation for correctness, edge cases, and potential issues. Check that it follows project conventions.` },
+    ]
+  }
+
+  // Analysis tasks
+  if (/\b(analyze|review|audit|investigate|explore)\b/.test(lower)) {
+    return [
+      { name: 'explorer', purpose: 'Map project structure', instruction: `${task}\n\nFocus on understanding the project structure: read key config files, list directories, and identify the main source files and their purposes.` },
+      { name: 'analyzer', purpose: 'Deep-dive into patterns', instruction: `${task}\n\nFocus on analyzing code patterns: search for key function definitions, import patterns, and architectural decisions in the source code.` },
+      { name: 'reviewer', purpose: 'Assess quality and issues', instruction: `${task}\n\nFocus on code quality: look for potential bugs, security issues, error handling patterns, and test coverage. Check for common anti-patterns.` },
+    ]
+  }
+
+  // Default: general-purpose split
   return [
-    {
-      name: 'explorer',
-      purpose: 'Explore project structure',
-      instruction: `${task}\n\nFocus on understanding the project structure: read key config files (package.json, tsconfig.json, etc.), list directories, and identify the main source files and their purposes.`,
-    },
-    {
-      name: 'analyzer',
-      purpose: 'Analyze code patterns',
-      instruction: `${task}\n\nFocus on analyzing code patterns: search for key function definitions, class structures, import patterns, and architectural decisions in the source code.`,
-    },
-    {
-      name: 'reviewer',
-      purpose: 'Review code quality',
-      instruction: `${task}\n\nFocus on code quality: look for potential bugs, security issues, error handling patterns, and test coverage. Check for common anti-patterns.`,
-    },
+    { name: 'researcher', purpose: 'Gather context and information', instruction: `${task}\n\nFocus on gathering all relevant context: read files, search for patterns, and build a comprehensive understanding of what's needed.` },
+    { name: 'executor', purpose: 'Execute the primary task', instruction: `${task}\n\nFocus on the core work: complete the main deliverable of this task using the available tools.` },
+    { name: 'reviewer', purpose: 'Review and validate results', instruction: `${task}\n\nFocus on reviewing the work: verify correctness, check for issues, and ensure quality.` },
   ]
 }
 

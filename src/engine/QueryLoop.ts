@@ -88,7 +88,7 @@ export async function* queryLoop(
     // --- Pre-flight: context management ---
     // Apply tiered decay (full → summary → stub) to old tool results
     if (options.contextManager) {
-      const { messages: decayed, actions } = await options.contextManager.applyDecay(state.messages, state.turnCount)
+      const { messages: decayed, actions } = await options.contextManager.applyDecay(state.messages, state.turnCount, options.signal)
       state.messages = decayed
       for (const action of actions) {
         options.onContextAction?.({ type: action.type, tokensSaved: action.tokensSaved })
@@ -168,6 +168,7 @@ export async function* queryLoop(
       if (!state.maxTokensOverride) {
         // First hit: escalate from 8K to 64K
         state.maxTokensOverride = ESCALATED_MAX_TOKENS
+        state.turnCount++
         const cont: Continue = { type: 'continue', reason: 'max_tokens_escalation' }
         options.onTransition?.(cont)
         state.transition = cont
@@ -182,6 +183,7 @@ export async function* queryLoop(
           turn: state.turnCount,
         }]
         state.recoveryCount++
+        state.turnCount++
         const cont: Continue = { type: 'continue', reason: 'max_tokens_recovery' }
         options.onTransition?.(cont)
         state.transition = cont

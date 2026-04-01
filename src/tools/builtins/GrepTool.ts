@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../Tool.js'
+import { assertWithinRoot } from '../../utils/pathSecurity.js'
 
 const inputSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -21,7 +22,8 @@ export const GrepTool: ToolDefinition<z.infer<typeof inputSchema>> = {
       const maxResults = input.max_results ?? 50
       args.push('--max-count', String(maxResults))
       args.push('--', input.pattern)
-      args.push(input.path ?? process.cwd())
+      const searchPath = input.path ? assertWithinRoot(input.path) : process.cwd()
+      args.push(searchPath)
 
       const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' })
       // Read stdout and stderr concurrently before awaiting exit (avoids race)

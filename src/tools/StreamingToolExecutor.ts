@@ -34,21 +34,25 @@ export function createStreamingToolExecutor(
     toolUse: ToolUseBlock,
     definition: ToolDefinition,
     concurrent: boolean,
-  ): Promise<void> {
+  ): Promise<CompletedTool> {
     const start = performance.now()
     try {
       const result = await definition.call(
         definition.inputSchema.parse(toolUse.input),
         siblingAbort.signal,
       )
-      completed.push({
+      return {
         toolUse,
         result,
         durationMs: performance.now() - start,
         concurrent,
-      })
+      }
     } catch (error) {
-      completed.push({
+      // Abort sibling concurrent tools on error (Claude Code pattern)
+      if (concurrent) {
+        siblingAbort.abort(error)
+      }
+      return {
         toolUse,
         result: {
           content: `Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -56,10 +60,6 @@ export function createStreamingToolExecutor(
         },
         durationMs: performance.now() - start,
         concurrent,
-      })
-      // Abort sibling concurrent tools on error (Claude Code pattern)
-      if (concurrent) {
-        siblingAbort.abort(error)
       }
     }
   }
@@ -79,8 +79,10 @@ export function createStreamingToolExecutor(
       }
 
       if (definition.isConcurrencySafe) {
-        // Start immediately in parallel
-        const promise = executeTool(toolUse, definition, true)
+        // Start immediately in parallel — collect result via promise
+        const promise = executeTool(toolUse, definition, true).then(result => {
+          completed.push(result)
+        })
         running.set(toolUse.id, promise)
         concurrentBatch.push(promise)
       } else {
@@ -104,8 +106,8 @@ export function createStreamingToolExecutor(
 
       // Execute pending serial tools one at a time
       for (const { toolUse, definition } of pending) {
-        await executeTool(toolUse, definition, false)
-        yield completed.shift()!
+        const result = await executeTool(toolUse, definition, false)
+        yield result
       }
       pending.length = 0
     },

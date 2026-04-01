@@ -32,7 +32,7 @@ export async function runWorker(options: WorkerOptions): Promise<TaskNotificatio
   let toolUseCount = 0
   let totalTokens = 0
 
-  registry.update(id, { status: 'running' })
+  registry.update(id, { status: 'running', controller: childAbort })
   options.onEvent?.(id, 'started')
 
   const messages: Message[] = [{
@@ -111,6 +111,11 @@ export async function runWorker(options: WorkerOptions): Promise<TaskNotificatio
       status: 'failed',
       summary: `Worker "${name}" failed: ${errorMsg}`,
       usage: { totalTokens, toolUses: toolUseCount, durationMs },
+    }
+  } finally {
+    // Release the parent listener by aborting the child controller
+    if (!childAbort.signal.aborted) {
+      childAbort.abort('worker_completed')
     }
   }
 }

@@ -26,7 +26,7 @@ export function createContextManager(deps: ContextManagerDeps) {
   const summaryCache = new Map<string, string>() // tool_use_id -> summary
 
   /** Generate a summary of a tool result using the local model. */
-  async function summarizeToolResult(toolName: string, content: string): Promise<string> {
+  async function summarizeToolResult(toolName: string, content: string, signal?: AbortSignal): Promise<string> {
     if (!deps.localClient || !(await deps.localClient.isAvailable())) {
       // Fallback: take first 200 chars
       return content.slice(0, 200) + (content.length > 200 ? '...' : '')
@@ -41,9 +41,11 @@ export function createContextManager(deps: ContextManagerDeps) {
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }], turn: 0 }],
       tools: [],
       maxTokens: 200,
+      signal,
     })
 
     for await (const event of stream) {
+      if (signal?.aborted) break
       if (event.type === 'text_delta') summary += event.text
     }
 
@@ -63,7 +65,7 @@ export function createContextManager(deps: ContextManagerDeps) {
      * Apply tiered decay to messages before an API call.
      * Returns a new message array with old tool results decayed.
      */
-    async applyDecay(messages: Message[], currentTurn: number): Promise<{
+    async applyDecay(messages: Message[], currentTurn: number, signal?: AbortSignal): Promise<{
       messages: Message[]
       actions: ContextAction[]
     }> {
@@ -118,7 +120,7 @@ export function createContextManager(deps: ContextManagerDeps) {
                 b => b.type === 'tool_use' && b.id === block.tool_use_id
               )
               const toolName = toolUse && 'name' in toolUse ? toolUse.name : 'unknown'
-              summary = await summarizeToolResult(toolName, block.content)
+              summary = await summarizeToolResult(toolName, block.content, signal)
               summaryCache.set(block.tool_use_id, summary)
             }
             newContent.push({ ...block, content: `[Summary] ${summary}` })

@@ -51,12 +51,16 @@ function classifyComplexity(messages: Message[]): number {
 
 export function createRouter(deps: RouterDeps) {
   let localAvailable: boolean | null = null
+  let lastAvailabilityCheck = 0
+  const RECHECK_INTERVAL_MS = 30_000 // Re-check local availability every 30s
 
   return {
     async route(messages: Message[], purpose?: string): Promise<RoutingDecision> {
-      // Check local availability (retries if previously unavailable)
-      if (localAvailable !== true) {
+      // Re-check local availability periodically (detect recovery or failure)
+      const now = Date.now()
+      if (localAvailable === null || now - lastAvailabilityCheck > RECHECK_INTERVAL_MS) {
         localAvailable = await deps.localClient.isAvailable()
+        lastAvailabilityCheck = now
       }
 
       // Override for specific purposes

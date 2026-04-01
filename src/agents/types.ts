@@ -13,6 +13,8 @@ export type AgentState = {
   totalTokens: number
   result?: string
   error?: string
+  /** AbortController for this agent — call .abort() to cancel in-flight work */
+  controller?: AbortController
 }
 
 export type TaskNotification = {

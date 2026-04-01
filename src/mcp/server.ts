@@ -66,10 +66,12 @@ export function createMcpServer(deps: McpServerDeps) {
       }]
 
       let responseText = ''
+      const querySignal = AbortSignal.timeout(120_000)
       const loop = queryLoop(messages, {
         ...deps.queryDeps,
         maxTurns: 10,
         purpose: 'reason',
+        signal: querySignal,
       })
 
       let result = await loop.next()
@@ -98,31 +100,42 @@ export function createMcpServer(deps: McpServerDeps) {
       value: z.number(),
     },
     async ({ setting, value }) => {
-      if (deps.config) {
-        switch (setting) {
-          case 'routing_threshold':
-            deps.config.routingComplexityThreshold = value
-            break
-          case 'decay_full_turns':
-            deps.config.contextDecayFullTurns = value
-            break
-          case 'decay_summary_turns':
-            deps.config.contextDecaySummaryTurns = value
-            break
-        }
+      if (!deps.config) {
         return {
-          content: [{
-            type: 'text',
-            text: `Configuration updated: ${setting} = ${value}`,
-          }],
+          content: [{ type: 'text', text: 'Cannot update configuration in metrics-only mode' }],
+          isError: true,
         }
       }
+
+      // Validate ranges per setting
+      const ranges: Record<string, { min: number; max: number }> = {
+        routing_threshold: { min: 0, max: 1 },
+        decay_full_turns: { min: 0, max: 50 },
+        decay_summary_turns: { min: 1, max: 100 },
+      }
+
+      const range = ranges[setting]!
+      if (!Number.isFinite(value) || value < range.min || value > range.max) {
+        return {
+          content: [{ type: 'text', text: `Invalid value for ${setting}: must be between ${range.min} and ${range.max}` }],
+          isError: true,
+        }
+      }
+
+      switch (setting) {
+        case 'routing_threshold':
+          deps.config.routingComplexityThreshold = value
+          break
+        case 'decay_full_turns':
+          deps.config.contextDecayFullTurns = value
+          break
+        case 'decay_summary_turns':
+          deps.config.contextDecaySummaryTurns = value
+          break
+      }
+
       return {
-        content: [{
-          type: 'text',
-          text: `Cannot update configuration in metrics-only mode`,
-        }],
-        isError: true,
+        content: [{ type: 'text', text: `Configuration updated: ${setting} = ${value}` }],
       }
     },
   )

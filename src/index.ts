@@ -19,6 +19,8 @@ import { GrepTool } from './tools/builtins/GrepTool.js'
 import { WriteFileTool } from './tools/builtins/WriteFileTool.js'
 import chalk from 'chalk'
 import type { Message } from './engine/types.js'
+import { formatCost } from './utils/format.js'
+import { formatTokens } from './utils/tokens.js'
 
 // --- Parse CLI args ---
 const args = process.argv.slice(2)
@@ -104,18 +106,41 @@ async function main() {
   console.log(chalk.dim(`  Dashboard: http://localhost:${config.dashboardPort}\n`))
 
   // Start dashboard
-  dashboard.start()
+  const server = dashboard.start()
 
   // Render initial status
   terminalUI.render()
 
   const abortController = new AbortController()
-  process.on('SIGINT', () => {
+
+  function gracefulShutdown() {
     terminalUI.clear()
-    console.log(chalk.dim('\nAborted.'))
+    console.log(chalk.dim('\nShutting down...'))
+
+    // 1. Abort all in-flight work
     abortController.abort()
+
+    // 2. Clean up observability (release EventBus listeners)
+    terminalUI.destroy()
+    metricsCollector.destroy()
+
+    // 3. Stop the dashboard HTTP server
+    server.stop()
+
+    // 4. Print final metrics
+    const savings = metricsCollector.getSavings()
+    const metrics = metricsCollector.getMetrics()
+    const totalCalls = metrics.claude.calls + metrics.local.calls
+    if (totalCalls > 0) {
+      console.log(chalk.bold.green(`  Savings: ${savings.percentSaved.toFixed(0)}% (${formatCost(savings.costSaved)} saved)`))
+      console.log(chalk.dim(`  ${totalCalls} API calls, ${formatTokens(metrics.claude.inputTokens + metrics.claude.outputTokens + metrics.local.inputTokens + metrics.local.outputTokens)} tokens total\n`))
+    }
+
     process.exit(0)
-  })
+  }
+
+  process.on('SIGINT', gracefulShutdown)
+  process.on('SIGTERM', gracefulShutdown)
 
   if (isMultiAgent) {
     // --- Multi-agent mode ---
@@ -232,12 +257,19 @@ async function main() {
     }
   }
 
-  // Final status
+  // Final status — use the same cleanup as graceful shutdown
   console.log('')
   terminalUI.render()
 
   const savings = metricsCollector.getSavings()
-  console.log(chalk.bold.green(`\n  Total savings: ${savings.percentSaved.toFixed(0)}%\n`))
+  const metrics = metricsCollector.getMetrics()
+  console.log(chalk.bold.green(`\n  Savings: ${savings.percentSaved.toFixed(0)}% (${formatCost(savings.costSaved)} saved)`))
+  console.log(chalk.dim(`  ${metrics.claude.calls + metrics.local.calls} API calls, ${formatTokens(metrics.claude.inputTokens + metrics.claude.outputTokens + metrics.local.inputTokens + metrics.local.outputTokens)} tokens total\n`))
+
+  // Clean up
+  terminalUI.destroy()
+  metricsCollector.destroy()
+  server.stop()
 }
 
 main().catch((error) => {

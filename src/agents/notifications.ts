@@ -1,5 +1,6 @@
 import type { TaskNotification } from './types.js'
 import type { Message } from '../engine/types.js'
+import { escapeXml } from '../utils/escapeXml.js'
 
 /**
  * Format a task notification as XML for injection into the coordinator's messages.
@@ -8,11 +9,11 @@ import type { Message } from '../engine/types.js'
  */
 export function formatNotification(notification: TaskNotification): string {
   return `<task-notification>
-<task-id>${notification.taskId}</task-id>
-<name>${notification.name}</name>
-<status>${notification.status}</status>
-<summary>${notification.summary}</summary>
-${notification.result ? `<result>${notification.result}</result>` : ''}
+<task-id>${escapeXml(notification.taskId)}</task-id>
+<name>${escapeXml(notification.name)}</name>
+<status>${escapeXml(notification.status)}</status>
+<summary>${escapeXml(notification.summary)}</summary>
+${notification.result ? `<result>${escapeXml(notification.result)}</result>` : ''}
 <usage>
   <total-tokens>${notification.usage.totalTokens}</total-tokens>
   <tool-uses>${notification.usage.toolUses}</tool-uses>
