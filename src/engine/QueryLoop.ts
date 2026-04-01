@@ -1,0 +1,210 @@
+import type { Message, StreamEvent, ToolSchema, ContentBlock, ToolUseBlock, TokenUsage } from './types.js'
+import type { Terminal, Continue, Transition } from './transitions.js'
+import type { Router } from '../routing/Router.js'
+import type { NexusConfig } from '../config.js'
+import { estimateMessageTokens } from '../utils/tokens.js'
+
+export type ToolExecutor = {
+  execute(toolUse: ToolUseBlock, signal?: AbortSignal): Promise<{ content: string; isError?: boolean }>
+}
+
+export type QueryLoopOptions = {
+  systemPrompt: string
+  tools: ToolSchema[]
+  toolExecutor: ToolExecutor
+  router: Router
+  config: NexusConfig
+  maxTurns?: number
+  signal?: AbortSignal
+  /** Optional purpose hint for routing (e.g., 'summarize', 'reason') */
+  purpose?: string
+  /** Callback for every stream event */
+  onEvent?: (event: StreamEvent) => void
+  /** Callback for routing decisions */
+  onRoute?: (decision: { provider: string; reason: string }) => void
+  /** Callback for transitions */
+  onTransition?: (transition: Transition) => void
+  /** Callback for context management actions */
+  onContextAction?: (action: { type: string; tokensSaved: number }) => void
+}
+
+type QueryState = {
+  messages: Message[]
+  turnCount: number
+  maxTokensOverride?: number
+  recoveryCount: number
+  totalUsage: TokenUsage
+  transition?: Transition
+}
+
+const DEFAULT_MAX_TOKENS = 8192
+const ESCALATED_MAX_TOKENS = 64000
+const MAX_RECOVERY_ATTEMPTS = 3
+const DEFAULT_MAX_TURNS = 50
+
+/**
+ * The flat state-machine query loop.
+ * Pattern: Claude Code's query.ts — while(true) with explicit transitions.
+ * No recursion, no callbacks for control flow, explicit state snapshots.
+ */
+export async function* queryLoop(
+  initialMessages: Message[],
+  options: QueryLoopOptions,
+): AsyncGenerator<StreamEvent, Terminal> {
+  const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS
+
+  let state: QueryState = {
+    messages: [...initialMessages],
+    turnCount: 0,
+    recoveryCount: 0,
+    totalUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  }
+
+  while (true) {
+    // --- Check abort ---
+    if (options.signal?.aborted) {
+      const terminal: Terminal = { type: 'terminal', reason: 'aborted' }
+      options.onTransition?.(terminal)
+      return terminal
+    }
+
+    // --- Check max turns ---
+    if (state.turnCount >= maxTurns) {
+      const terminal: Terminal = { type: 'terminal', reason: 'max_turns' }
+      options.onTransition?.(terminal)
+      return terminal
+    }
+
+    // --- Route to model ---
+    const decision = await options.router.route(state.messages, options.purpose)
+    const client = options.router.getClient(decision.provider)
+    options.onRoute?.({ provider: decision.provider, reason: decision.reason })
+
+    // --- Stream from model ---
+    const maxTokens = state.maxTokensOverride ?? DEFAULT_MAX_TOKENS
+    let assistantMessage: Message | undefined
+    let stopReason: StreamEvent extends { type: 'message_complete' } ? StreamEvent['stopReason'] : string = 'end_turn'
+    let turnUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }
+    const toolUseBlocks: ToolUseBlock[] = []
+
+    try {
+      const stream = client.stream({
+        model: decision.model,
+        systemPrompt: options.systemPrompt,
+        messages: state.messages,
+        tools: options.tools,
+        maxTokens,
+        signal: options.signal,
+      })
+
+      for await (const event of stream) {
+        yield event
+        options.onEvent?.(event)
+
+        if (event.type === 'tool_use_complete') {
+          toolUseBlocks.push({ type: 'tool_use', id: event.id, name: event.name, input: event.input })
+        }
+
+        if (event.type === 'message_complete') {
+          assistantMessage = { ...event.message, turn: state.turnCount }
+          stopReason = event.stopReason
+          turnUsage = event.usage
+        }
+      }
+    } catch (error) {
+      const terminal: Terminal = { type: 'terminal', reason: 'error', error }
+      options.onTransition?.(terminal)
+      return terminal
+    }
+
+    // --- Update total usage ---
+    state.totalUsage.inputTokens += turnUsage.inputTokens
+    state.totalUsage.outputTokens += turnUsage.outputTokens
+    state.totalUsage.cacheReadTokens += turnUsage.cacheReadTokens
+    state.totalUsage.cacheCreationTokens += turnUsage.cacheCreationTokens
+
+    // --- Add assistant message to history ---
+    if (assistantMessage) {
+      state.messages = [...state.messages, assistantMessage]
+    }
+
+    // --- Handle stop reason ---
+
+    // max_tokens: escalate or recover (Claude Code pattern)
+    if (stopReason === 'max_tokens') {
+      if (!state.maxTokensOverride) {
+        // First hit: escalate from 8K to 64K
+        state.maxTokensOverride = ESCALATED_MAX_TOKENS
+        const cont: Continue = { type: 'continue', reason: 'max_tokens_escalation' }
+        options.onTransition?.(cont)
+        state.transition = cont
+        continue
+      }
+
+      if (state.recoveryCount < MAX_RECOVERY_ATTEMPTS) {
+        // Inject resume message
+        state.messages = [...state.messages, {
+          role: 'user',
+          content: [{ type: 'text', text: 'Output token limit hit. Resume directly — no apology, no recap, just continue exactly where you left off.' }],
+          turn: state.turnCount,
+        }]
+        state.recoveryCount++
+        const cont: Continue = { type: 'continue', reason: 'max_tokens_recovery' }
+        options.onTransition?.(cont)
+        state.transition = cont
+        continue
+      }
+
+      // Give up after MAX_RECOVERY_ATTEMPTS
+      const terminal: Terminal = { type: 'terminal', reason: 'error', error: new Error('Exceeded max_tokens recovery attempts') }
+      options.onTransition?.(terminal)
+      return terminal
+    }
+
+    // tool_use: execute tools and continue
+    if (stopReason === 'tool_use' && toolUseBlocks.length > 0) {
+      const toolResults: ContentBlock[] = []
+
+      // Execute tools — concurrent for read-only, serial for writes
+      // (StreamingToolExecutor handles this in Phase 3, here we do simple serial)
+      for (const toolUse of toolUseBlocks) {
+        try {
+          const result = await options.toolExecutor.execute(toolUse, options.signal)
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: result.content,
+            is_error: result.isError,
+          })
+        } catch (error) {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: `Tool execution error: ${error instanceof Error ? error.message : String(error)}`,
+            is_error: true,
+          })
+        }
+      }
+
+      // Add tool results as a user message
+      state.messages = [...state.messages, {
+        role: 'user',
+        content: toolResults,
+        turn: state.turnCount,
+      }]
+
+      state.turnCount++
+      state.recoveryCount = 0
+      state.maxTokensOverride = undefined
+      const cont: Continue = { type: 'continue', reason: 'tool_use' }
+      options.onTransition?.(cont)
+      state.transition = cont
+      continue
+    }
+
+    // end_turn: we're done
+    const terminal: Terminal = { type: 'terminal', reason: 'completed' }
+    options.onTransition?.(terminal)
+    return terminal
+  }
+}
