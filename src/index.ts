@@ -21,6 +21,11 @@ import chalk from 'chalk'
 import type { Message } from './engine/types.js'
 import { formatCost } from './utils/format.js'
 import { formatTokens } from './utils/tokens.js'
+import { createMemoryStore } from './observer/MemoryStore.js'
+import { createObserverManager } from './observer/ObserverManager.js'
+import { createSafetyObserver } from './observer/builtins/SafetyObserver.js'
+import { createMemoryObserver } from './observer/builtins/MemoryObserver.js'
+import { createCostObserver } from './observer/builtins/CostObserver.js'
 
 // --- Parse CLI args ---
 const args = process.argv.slice(2)
@@ -49,8 +54,15 @@ const toolRegistry = createToolRegistry([ReadFileTool, BashTool, GrepTool, Write
 const contextManager = createContextManager({ config, localClient })
 const compactionStrategy = createCompactionStrategy(config, localClient)
 
-// Dashboard
-const dashboard = createDashboardServer(config.dashboardPort, metricsCollector, eventBus)
+// Memory system
+const memoryStore = createMemoryStore({
+  memoryDir: `${process.cwd()}/${config.memoryDir}`,
+  maxEntries: config.memoryMaxEntries,
+  maxPromptEntries: config.memoryMaxPromptEntries,
+})
+
+// Load memories for system prompt injection
+const memoryBlock = await memoryStore.buildPromptBlock()
 
 // --- System prompt ---
 const SYSTEM_PROMPT = `You are Nexus, a hybrid AI agent that routes work between local models and Claude API for maximum efficiency.
@@ -67,7 +79,36 @@ When analyzing a codebase:
 3. Read specific files for deeper understanding
 4. Provide a clear, structured summary
 
-Be concise and actionable. Focus on what matters.`
+Be concise and actionable. Focus on what matters.${memoryBlock ? '\n\n' + memoryBlock : ''}`
+
+// Shared query dependencies — reused by CLI, MCP, and web UI
+const queryDeps = {
+  systemPrompt: SYSTEM_PROMPT,
+  tools: toolRegistry.getSchemas(),
+  toolExecutor: toolRegistry,
+  toolRegistry,
+  contextManager,
+  compactionStrategy,
+  router,
+  config,
+}
+
+// Observer system — meta-cognitive side-inference
+const observerManager = createObserverManager({
+  eventBus,
+  memoryStore,
+  inferenceClient: config.observerModel === 'claude' ? claudeClient : localClient,
+  inferenceModel: config.observerModel === 'claude' ? config.claudeModel : config.exoModel,
+})
+
+if (config.observersEnabled) {
+  if (config.observerSafety) observerManager.register(createSafetyObserver())
+  if (config.observerCost) observerManager.register(createCostObserver())
+  if (config.observerMemory) observerManager.register(createMemoryObserver())
+}
+
+// Dashboard (receives queryDeps to serve the interactive web UI)
+const dashboard = createDashboardServer(config.dashboardPort, metricsCollector, eventBus, queryDeps)
 
 // --- MCP Mode ---
 if (isMcp) {
@@ -75,16 +116,7 @@ if (isMcp) {
   const mcpServer = createMcpServer({
     metricsCollector,
     config,
-    queryDeps: {
-      systemPrompt: SYSTEM_PROMPT,
-      tools: toolRegistry.getSchemas(),
-      toolExecutor: toolRegistry,
-      toolRegistry,
-      contextManager,
-      compactionStrategy,
-      router,
-      config,
-    },
+    queryDeps,
   })
   await mcpServer.startStdio()
   // MCP server runs until stdin closes
@@ -120,11 +152,15 @@ async function main() {
     // 1. Abort all in-flight work
     abortController.abort()
 
-    // 2. Clean up observability (release EventBus listeners)
+    // 2. Drain in-flight observers
+    observerManager.drain().catch(() => {})
+    observerManager.destroy()
+
+    // 3. Clean up observability (release EventBus listeners)
     terminalUI.destroy()
     metricsCollector.destroy()
 
-    // 3. Stop the dashboard HTTP server
+    // 4. Stop the dashboard HTTP server
     server.stop()
 
     // 4. Print final metrics
@@ -249,6 +285,10 @@ async function main() {
         }
         terminalUI.render()
       },
+      async onTurnComplete(snapshot) {
+        const trigger = snapshot.transition.type === 'terminal' ? 'on_complete' : 'every_turn'
+        await observerManager.notify(trigger, snapshot)
+      },
     })
 
     let result = await loop.next()
@@ -267,6 +307,8 @@ async function main() {
   console.log(chalk.dim(`  ${metrics.claude.calls + metrics.local.calls} API calls, ${formatTokens(metrics.claude.inputTokens + metrics.claude.outputTokens + metrics.local.inputTokens + metrics.local.outputTokens)} tokens total\n`))
 
   // Clean up
+  await observerManager.drain()
+  observerManager.destroy()
   terminalUI.destroy()
   metricsCollector.destroy()
   server.stop()

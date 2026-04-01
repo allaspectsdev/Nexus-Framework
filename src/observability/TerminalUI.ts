@@ -83,6 +83,15 @@ export function createTerminalUI(eventBus: EventBus, metricsCollector: MetricsCo
       )
     }
 
+    // Observers
+    if (m.observers.runs > 0) {
+      const observerParts = [chalk.dim('Observers: ') + chalk.cyan(`${m.observers.runs} runs`)]
+      if (m.observers.memoriesWritten > 0) observerParts.push(chalk.green(`${m.observers.memoriesWritten} memories`))
+      if (m.observers.warnings > 0) observerParts.push(chalk.yellow(`${m.observers.warnings} warnings`))
+      if (m.observers.criticals > 0) observerParts.push(chalk.red(`${m.observers.criticals} critical`))
+      lines.push(observerParts.join(chalk.dim(' | ')))
+    }
+
     lines.push(chalk.dim('─'.repeat(72)))
 
     return lines

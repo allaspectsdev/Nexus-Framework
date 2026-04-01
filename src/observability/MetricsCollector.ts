@@ -13,6 +13,7 @@ export type Metrics = {
   agents: { spawned: number; completed: number; failed: number }
   tools: { executions: number; concurrent: number; errors: number; totalDurationMs: number }
   context: { decayActions: number; tokensSaved: number; compactions: number }
+  observers: { runs: number; memoriesWritten: number; warnings: number; criticals: number }
   startedAt: number
 }
 
@@ -24,6 +25,7 @@ export function createMetricsCollector(eventBus: EventBus) {
     agents: { spawned: 0, completed: 0, failed: 0 },
     tools: { executions: 0, concurrent: 0, errors: 0, totalDurationMs: 0 },
     context: { decayActions: 0, tokensSaved: 0, compactions: 0 },
+    observers: { runs: 0, memoriesWritten: 0, warnings: 0, criticals: 0 },
     startedAt: Date.now(),
   }
 
@@ -67,6 +69,14 @@ export function createMetricsCollector(eventBus: EventBus) {
       case 'compaction':
         metrics.context.compactions++
         metrics.context.tokensSaved += event.tokensSaved
+        break
+      case 'observer_log':
+        metrics.observers.runs++
+        if (event.severity === 'warning') metrics.observers.warnings++
+        if (event.severity === 'critical') metrics.observers.criticals++
+        break
+      case 'observer_memory':
+        metrics.observers.memoriesWritten++
         break
     }
   })

@@ -1,5 +1,6 @@
 import type { Message, StreamEvent, ToolSchema, ContentBlock, ToolUseBlock, TokenUsage } from './types.js'
 import type { Terminal, Continue, Transition } from './transitions.js'
+import type { TurnSnapshot } from '../observer/types.js'
 import type { Router } from '../routing/Router.js'
 import type { NexusConfig } from '../config.js'
 import type { ContextManager } from '../context/ContextManager.js'
@@ -36,6 +37,8 @@ export type QueryLoopOptions = {
   onTransition?: (transition: Transition) => void
   /** Callback for context management actions */
   onContextAction?: (action: { type: string; tokensSaved: number }) => void
+  /** Called at turn boundaries for the observer system. Receives a frozen snapshot. */
+  onTurnComplete?: (snapshot: TurnSnapshot) => void | Promise<void>
 }
 
 type QueryState = {
@@ -51,6 +54,24 @@ const DEFAULT_MAX_TOKENS = 8192
 const ESCALATED_MAX_TOKENS = 64000
 const MAX_RECOVERY_ATTEMPTS = 3
 const DEFAULT_MAX_TURNS = 50
+
+function createTurnSnapshot(state: QueryState, toolUseBlocks: ToolUseBlock[], transition: Transition): TurnSnapshot {
+  const lastAssistant = [...state.messages].reverse().find(m => m.role === 'assistant')
+  const lastAssistantText = lastAssistant?.content
+    .filter(b => b.type === 'text')
+    .map(b => b.type === 'text' ? b.text : '')
+    .join('\n') ?? ''
+
+  return {
+    messages: [...state.messages],
+    turnCount: state.turnCount,
+    totalUsage: { ...state.totalUsage },
+    transition,
+    toolUseBlocks: [...toolUseBlocks],
+    lastAssistantText,
+    timestamp: Date.now(),
+  }
+}
 
 /**
  * The flat state-machine query loop.
@@ -249,12 +270,18 @@ export async function* queryLoop(
       const cont: Continue = { type: 'continue', reason: 'tool_use' }
       options.onTransition?.(cont)
       state.transition = cont
+      if (options.onTurnComplete) {
+        await options.onTurnComplete(createTurnSnapshot(state, toolUseBlocks, cont))
+      }
       continue
     }
 
     // end_turn: we're done
     const terminal: Terminal = { type: 'terminal', reason: 'completed' }
     options.onTransition?.(terminal)
+    if (options.onTurnComplete) {
+      await options.onTurnComplete(createTurnSnapshot(state, [], terminal))
+    }
     return terminal
   }
 }

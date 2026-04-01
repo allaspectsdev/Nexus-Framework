@@ -10,6 +10,16 @@ export const configSchema = z.object({
   contextDecayFullTurns: z.number().int().min(0).max(50).default(2),
   contextDecaySummaryTurns: z.number().int().min(1).max(100).default(5),
   maxConcurrentAgents: z.number().int().min(1).max(20).default(4),
+  // Observer system
+  observersEnabled: z.boolean().default(true),
+  observerModel: z.enum(['local', 'claude']).default('local'),
+  observerSafety: z.boolean().default(true),
+  observerMemory: z.boolean().default(true),
+  observerCost: z.boolean().default(true),
+  // Memory system
+  memoryDir: z.string().default('.nexus/memory'),
+  memoryMaxEntries: z.number().int().min(10).max(1000).default(200),
+  memoryMaxPromptEntries: z.number().int().min(1).max(50).default(20),
 })
 
 export type NexusConfig = z.infer<typeof configSchema>
@@ -25,6 +35,14 @@ export function loadConfig(): NexusConfig {
     contextDecayFullTurns: process.env.CONTEXT_DECAY_FULL_TURNS ? parseInt(process.env.CONTEXT_DECAY_FULL_TURNS, 10) : undefined,
     contextDecaySummaryTurns: process.env.CONTEXT_DECAY_SUMMARY_TURNS ? parseInt(process.env.CONTEXT_DECAY_SUMMARY_TURNS, 10) : undefined,
     maxConcurrentAgents: process.env.MAX_CONCURRENT_AGENTS ? parseInt(process.env.MAX_CONCURRENT_AGENTS, 10) : undefined,
+    observersEnabled: process.env.OBSERVERS_ENABLED ? process.env.OBSERVERS_ENABLED === 'true' : undefined,
+    observerModel: process.env.OBSERVER_MODEL || undefined,
+    observerSafety: process.env.OBSERVER_SAFETY ? process.env.OBSERVER_SAFETY === 'true' : undefined,
+    observerMemory: process.env.OBSERVER_MEMORY ? process.env.OBSERVER_MEMORY === 'true' : undefined,
+    observerCost: process.env.OBSERVER_COST ? process.env.OBSERVER_COST === 'true' : undefined,
+    memoryDir: process.env.MEMORY_DIR || undefined,
+    memoryMaxEntries: process.env.MEMORY_MAX_ENTRIES ? parseInt(process.env.MEMORY_MAX_ENTRIES, 10) : undefined,
+    memoryMaxPromptEntries: process.env.MEMORY_MAX_PROMPT_ENTRIES ? parseInt(process.env.MEMORY_MAX_PROMPT_ENTRIES, 10) : undefined,
   }
 
   const result = configSchema.safeParse(raw)

@@ -6,6 +6,9 @@ export type MetricEvent =
   | { type: 'context_decay'; tier: string; tokensSaved: number; messageCount: number }
   | { type: 'compaction'; tokensBefore: number; tokensAfter: number; tokensSaved: number }
   | { type: 'stream_text'; text: string; provider: 'local' | 'claude' }
+  | { type: 'observer_log'; observer: string; message: string; severity: 'info' | 'warning' | 'critical' }
+  | { type: 'observer_memory'; observer: string; memoryType: string }
+  | { type: 'observer_metric'; observer: string; name: string; value: number }
 
 type Listener = (event: MetricEvent) => void
 

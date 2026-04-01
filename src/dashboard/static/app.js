@@ -6,7 +6,18 @@ const MAX_HISTORY = 60
 let canvas, ctx
 
 // Agent timeline state
-const agentStates = new Map() // agentId -> { name, status, startedAt, durationMs }
+const agentStates = new Map()
+
+// Query state
+let currentMode = 'single'
+let isQuerying = false
+let currentResponseEl = null
+let currentResponseText = ''
+let currentThinkingText = ''
+let currentAbortController = null
+let messageCounter = 0
+
+// --- Formatters ---
 
 function formatTokens(n) {
   if (n < 1000) return String(n)
@@ -34,10 +45,11 @@ function formatUptime(ms) {
   return `${s}s`
 }
 
+// --- Metrics Updates ---
+
 function updateMetrics(data) {
   const { metrics: m, savings: s } = data
 
-  // Update uptime display
   if (data.uptime) {
     $('#uptime').textContent = formatUptime(data.uptime)
   }
@@ -85,6 +97,8 @@ function updateMetrics(data) {
   drawChart()
 }
 
+// --- Token Chart ---
+
 function drawChart() {
   if (!canvas || !ctx) return
   const w = canvas.width
@@ -109,7 +123,6 @@ function drawChart() {
     ctx.stroke()
   }
 
-  // Grid lines
   ctx.strokeStyle = '#1e1e2e'
   ctx.lineWidth = 1
   for (let i = 0; i < 5; i++) {
@@ -124,11 +137,12 @@ function drawChart() {
   drawLine(tokenHistory.local, '#059669')
   drawLine(tokenHistory.cached, '#2563eb')
 
-  // Y-axis label
   ctx.fillStyle = '#6b6b80'
   ctx.font = '10px monospace'
   ctx.fillText(formatTokens(maxVal), 4, 14)
 }
+
+// --- Event Log ---
 
 function addEventLog(event, timestamp) {
   const log = $('#event-log')
@@ -172,7 +186,6 @@ function addEventLog(event, timestamp) {
   el.appendChild(detailSpan)
   log.insertBefore(el, log.firstChild)
 
-  // Keep log manageable
   while (log.children.length > 100) log.removeChild(log.lastChild)
 }
 
@@ -220,16 +233,16 @@ function renderTimeline() {
   }
 }
 
-// --- SSE Connection ---
+// --- Dashboard SSE Connection (metrics) ---
 
 let reconnectDelay = 1000
 
-function connect() {
+function connectMetrics() {
   const evtSource = new EventSource('/events')
 
   evtSource.onopen = () => {
     $('#status').classList.remove('disconnected')
-    reconnectDelay = 1000 // Reset backoff on successful connect
+    reconnectDelay = 1000
   }
 
   evtSource.onmessage = (e) => {
@@ -238,7 +251,6 @@ function connect() {
 
       if (data.type === 'snapshot') {
         updateMetrics(data)
-        // Load recent events and rebuild agent timeline
         for (const evt of data.recentEvents || []) {
           addEventLog(evt, evt.timestamp)
           updateAgentTimeline(evt)
@@ -254,16 +266,282 @@ function connect() {
   evtSource.onerror = () => {
     $('#status').classList.add('disconnected')
     evtSource.close()
-    // Exponential backoff with cap at 10s
-    setTimeout(connect, reconnectDelay)
+    setTimeout(connectMetrics, reconnectDelay)
     reconnectDelay = Math.min(reconnectDelay * 1.5, 10000)
   }
 }
 
-// --- Init ---
+// --- Query Submission & Streaming ---
+
+function appendUserMessage(text) {
+  const welcome = document.querySelector('.welcome-message')
+  if (welcome) welcome.remove()
+
+  const msg = document.createElement('div')
+  msg.className = 'message user'
+  const content = document.createElement('div')
+  content.className = 'message-content'
+  content.textContent = text
+  msg.appendChild(content)
+  $('#chat-messages').appendChild(msg)
+  scrollToBottom()
+}
+
+function createAssistantMessage() {
+  const msg = document.createElement('div')
+  msg.className = 'message assistant'
+  msg.id = `msg-${++messageCounter}`
+
+  const responseDiv = document.createElement('div')
+  responseDiv.className = 'response-content'
+  responseDiv.id = `response-${messageCounter}`
+  msg.appendChild(responseDiv)
+
+  $('#chat-messages').appendChild(msg)
+  currentResponseEl = responseDiv
+  currentResponseText = ''
+  currentThinkingText = ''
+  return msg
+}
+
+function scrollToBottom() {
+  const el = $('#chat-messages')
+  const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  if (isNearBottom) {
+    el.scrollTop = el.scrollHeight
+  }
+}
+
+function setQueryingState(querying) {
+  isQuerying = querying
+  const btn = $('#submit-btn')
+  const input = $('#query-input')
+  if (querying) {
+    btn.textContent = 'Cancel'
+    btn.classList.add('cancel')
+    input.disabled = true
+  } else {
+    btn.textContent = 'Send'
+    btn.classList.remove('cancel')
+    input.disabled = false
+    input.focus()
+  }
+}
+
+async function submitQuery() {
+  const input = $('#query-input')
+  const query = input.value.trim()
+  if (!query || isQuerying) return
+
+  input.value = ''
+  appendUserMessage(query)
+  const assistantMsg = createAssistantMessage()
+  setQueryingState(true)
+
+  currentAbortController = new AbortController()
+
+  try {
+    const response = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, mode: currentMode }),
+      signal: currentAbortController.signal,
+    })
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: 'Request failed' }))
+      showError(assistantMsg, err.error || `HTTP ${response.status}`)
+      setQueryingState(false)
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || ''
+
+      for (const part of parts) {
+        const line = part.trim()
+        if (!line.startsWith('data: ')) continue
+        try {
+          const event = JSON.parse(line.slice(6))
+          handleStreamEvent(event, assistantMsg)
+        } catch {}
+      }
+    }
+
+    // Process any remaining buffer
+    if (buffer.trim().startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.trim().slice(6))
+        handleStreamEvent(event, assistantMsg)
+      } catch {}
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      showError(assistantMsg, err.message)
+    }
+  } finally {
+    // Remove streaming cursor
+    const cursor = assistantMsg.querySelector('.streaming-cursor')
+    if (cursor) cursor.remove()
+    setQueryingState(false)
+    currentAbortController = null
+  }
+}
+
+function handleStreamEvent(event, assistantMsg) {
+  switch (event.type) {
+    case 'text_delta': {
+      currentResponseText += event.text
+      // Re-render markdown (marked escapes HTML by default — safe)
+      if (currentResponseEl && typeof marked !== 'undefined') {
+        currentResponseEl.innerHTML = marked.parse(currentResponseText)
+        // Add streaming cursor
+        let cursor = currentResponseEl.querySelector('.streaming-cursor')
+        if (!cursor) {
+          cursor = document.createElement('span')
+          cursor.className = 'streaming-cursor'
+        }
+        currentResponseEl.appendChild(cursor)
+      }
+      scrollToBottom()
+      break
+    }
+
+    case 'thinking_delta': {
+      currentThinkingText += event.thinking
+      let thinkingBlock = assistantMsg.querySelector('.thinking-block')
+      if (!thinkingBlock) {
+        thinkingBlock = document.createElement('details')
+        thinkingBlock.className = 'thinking-block'
+        const summary = document.createElement('summary')
+        summary.textContent = 'Thinking...'
+        thinkingBlock.appendChild(summary)
+        const content = document.createElement('div')
+        content.className = 'thinking-content'
+        thinkingBlock.appendChild(content)
+        // Insert before the response content
+        assistantMsg.insertBefore(thinkingBlock, currentResponseEl)
+      }
+      thinkingBlock.querySelector('.thinking-content').textContent = currentThinkingText
+      scrollToBottom()
+      break
+    }
+
+    case 'tool_use_start': {
+      const details = document.createElement('details')
+      details.className = 'tool-call'
+      details.id = `tool-${event.id}`
+      const summary = document.createElement('summary')
+      const nameSpan = document.createElement('span')
+      nameSpan.className = 'tool-name'
+      nameSpan.textContent = event.name
+      const spinner = document.createElement('span')
+      spinner.className = 'tool-spinner'
+      spinner.textContent = ' running...'
+      const preview = document.createElement('span')
+      preview.className = 'tool-preview'
+      summary.appendChild(nameSpan)
+      summary.appendChild(spinner)
+      summary.appendChild(preview)
+      details.appendChild(summary)
+      // Insert before the response div
+      assistantMsg.insertBefore(details, currentResponseEl)
+      scrollToBottom()
+      break
+    }
+
+    case 'tool_use_input_delta': {
+      const toolEl = assistantMsg.querySelector(`#tool-${event.id}`)
+      if (toolEl) {
+        const preview = toolEl.querySelector('.tool-preview')
+        if (preview) preview.textContent = event.input
+      }
+      break
+    }
+
+    case 'tool_use_complete': {
+      const toolEl = assistantMsg.querySelector(`#tool-${event.id}`)
+      if (toolEl) {
+        const spinner = toolEl.querySelector('.tool-spinner')
+        if (spinner) spinner.remove()
+        const preview = toolEl.querySelector('.tool-preview')
+        if (preview) {
+          preview.textContent = JSON.stringify(event.input).slice(0, 80)
+        }
+        // Add body with full input
+        const body = document.createElement('div')
+        body.className = 'tool-body'
+        body.textContent = JSON.stringify(event.input, null, 2)
+        toolEl.appendChild(body)
+      }
+      break
+    }
+
+    case 'agent_event': {
+      const div = document.createElement('div')
+      div.className = 'agent-event-inline'
+      const nameSpan = document.createElement('span')
+      nameSpan.className = 'agent-event-name'
+      if (event.event === 'worker_spawned' && event.data) {
+        nameSpan.textContent = event.data.name
+        div.appendChild(nameSpan)
+        div.appendChild(document.createTextNode(` spawned — ${event.data.purpose}`))
+      } else if (event.event === 'worker_completed' && event.data) {
+        nameSpan.textContent = event.data.name
+        div.appendChild(nameSpan)
+        div.appendChild(document.createTextNode(` completed`))
+      } else if (event.event === 'coordinator_started') {
+        div.textContent = 'Coordinator started — decomposing task...'
+      } else if (event.event === 'coordinator_completed' && event.data) {
+        div.textContent = `Coordinator synthesizing ${event.data.workerCount} worker results`
+      } else {
+        div.textContent = `${event.event}: ${JSON.stringify(event.data || '').slice(0, 60)}`
+      }
+      assistantMsg.insertBefore(div, currentResponseEl)
+      scrollToBottom()
+      break
+    }
+
+    case 'done': {
+      // Final render — remove cursor
+      if (currentResponseEl && typeof marked !== 'undefined' && currentResponseText) {
+        currentResponseEl.innerHTML = marked.parse(currentResponseText)
+      }
+      const cursor = assistantMsg.querySelector('.streaming-cursor')
+      if (cursor) cursor.remove()
+      scrollToBottom()
+      break
+    }
+
+    case 'error': {
+      showError(assistantMsg, event.message)
+      break
+    }
+  }
+}
+
+function showError(assistantMsg, message) {
+  const errDiv = document.createElement('div')
+  errDiv.style.cssText = 'color: var(--error); padding: 8px 0; font-size: 12px;'
+  errDiv.textContent = 'Error: ' + message
+  assistantMsg.appendChild(errDiv)
+  scrollToBottom()
+}
+
+// --- Canvas ---
 
 function initCanvas() {
   canvas = $('#token-chart')
+  if (!canvas) return
   requestAnimationFrame(() => {
     const dpr = window.devicePixelRatio || 1
     const w = canvas.offsetWidth || 400
@@ -272,7 +550,7 @@ function initCanvas() {
     canvas.height = h * dpr
     ctx = canvas.getContext('2d')
     ctx.scale(dpr, dpr)
-    drawChart() // Draw immediately after init
+    drawChart()
   })
 }
 
@@ -282,14 +560,15 @@ function debouncedInitCanvas() {
   resizeTimer = setTimeout(initCanvas, 150)
 }
 
+// --- Init ---
+
 window.addEventListener('DOMContentLoaded', () => {
   initCanvas()
-  connect()
+  connectMetrics()
 
-  // Debounced resize handler prevents torn frames during drag
   window.addEventListener('resize', debouncedInitCanvas)
 
-  // Update running agent durations every second
+  // Update running agent durations
   setInterval(() => {
     let hasRunning = false
     for (const [, agent] of agentStates) {
@@ -297,4 +576,39 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     if (hasRunning) renderTimeline()
   }, 1000)
+
+  // Mode toggle
+  $('#mode-single').addEventListener('click', () => {
+    currentMode = 'single'
+    $('#mode-single').classList.add('active')
+    $('#mode-multi').classList.remove('active')
+  })
+  $('#mode-multi').addEventListener('click', () => {
+    currentMode = 'multi'
+    $('#mode-multi').classList.add('active')
+    $('#mode-single').classList.remove('active')
+  })
+
+  // Query form
+  $('#query-form').addEventListener('submit', (e) => {
+    e.preventDefault()
+    if (isQuerying) {
+      // Cancel in-flight query
+      currentAbortController?.abort()
+      return
+    }
+    submitQuery()
+  })
+
+  // Ctrl/Cmd+Enter to submit
+  $('#query-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      if (isQuerying) {
+        currentAbortController?.abort()
+      } else {
+        submitQuery()
+      }
+    }
+  })
 })

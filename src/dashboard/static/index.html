@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nexus — Agent Dashboard</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 </head>
 <body>
   <header>
@@ -13,69 +14,90 @@
     <span id="uptime" class="uptime">--</span>
   </header>
 
-  <main>
-    <section class="panel savings-panel">
-      <h2>Savings</h2>
-      <div class="big-number" id="savings-pct">0%</div>
-      <div class="sub-stat" id="savings-cost">$0.0000 saved</div>
-      <div class="sub-stat" id="savings-tokens">0 tokens recovered</div>
-    </section>
-
-    <section class="panel tokens-panel">
-      <h2>Token Flow</h2>
-      <canvas id="token-chart" width="400" height="200"></canvas>
-      <div class="token-legend">
-        <span class="legend-item"><span class="dot claude"></span> Claude</span>
-        <span class="legend-item"><span class="dot local"></span> Local</span>
-        <span class="legend-item"><span class="dot cached"></span> Cached</span>
+  <div class="app-layout">
+    <section class="chat-panel">
+      <div class="chat-messages" id="chat-messages">
+        <div class="welcome-message">
+          <h2>Nexus Hybrid Agent</h2>
+          <p>Submit a query to run through the hybrid routing engine. Choose single agent for direct execution or multi-agent for coordinated parallel workers.</p>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <div class="mode-toggle">
+          <button id="mode-single" class="mode-btn active">Single Agent</button>
+          <button id="mode-multi" class="mode-btn">Multi-Agent</button>
+        </div>
+        <form id="query-form" class="query-form">
+          <textarea id="query-input" placeholder="Ask Nexus anything... (Ctrl+Enter to send)" rows="3"></textarea>
+          <button type="submit" id="submit-btn">Send</button>
+        </form>
       </div>
     </section>
 
-    <section class="panel agents-panel">
-      <h2>Agents</h2>
-      <div class="agent-stats">
-        <div class="stat"><span id="agents-active">0</span><label>Active</label></div>
-        <div class="stat"><span id="agents-completed">0</span><label>Done</label></div>
-        <div class="stat"><span id="agents-failed">0</span><label>Failed</label></div>
-      </div>
-      <div id="agent-timeline" class="timeline"></div>
-    </section>
+    <aside class="metrics-panel">
+      <section class="panel savings-panel">
+        <h2>Savings</h2>
+        <div class="big-number" id="savings-pct">0%</div>
+        <div class="sub-stat" id="savings-cost">$0.0000 saved</div>
+        <div class="sub-stat" id="savings-tokens">0 tokens recovered</div>
+      </section>
 
-    <section class="panel routing-panel">
-      <h2>Routing</h2>
-      <div class="routing-bar">
-        <div id="routing-local" class="bar-segment local" style="width: 0%"></div>
-        <div id="routing-claude" class="bar-segment claude" style="width: 100%"></div>
-      </div>
-      <div class="routing-labels">
-        <span id="routing-local-pct">0% local</span>
-        <span id="routing-claude-pct">100% claude</span>
-      </div>
-    </section>
+      <section class="panel tokens-panel">
+        <h2>Token Flow</h2>
+        <canvas id="token-chart" width="400" height="200"></canvas>
+        <div class="token-legend">
+          <span class="legend-item"><span class="dot claude"></span> Claude</span>
+          <span class="legend-item"><span class="dot local"></span> Local</span>
+          <span class="legend-item"><span class="dot cached"></span> Cached</span>
+        </div>
+      </section>
 
-    <section class="panel tools-panel">
-      <h2>Tools</h2>
-      <div class="tool-stats">
-        <div class="stat"><span id="tools-total">0</span><label>Total</label></div>
-        <div class="stat"><span id="tools-parallel">0</span><label>Parallel</label></div>
-        <div class="stat"><span id="tools-errors">0</span><label>Errors</label></div>
-      </div>
-    </section>
+      <section class="panel agents-panel">
+        <h2>Agents</h2>
+        <div class="agent-stats">
+          <div class="stat"><span id="agents-active">0</span><label>Active</label></div>
+          <div class="stat"><span id="agents-completed">0</span><label>Done</label></div>
+          <div class="stat"><span id="agents-failed">0</span><label>Failed</label></div>
+        </div>
+        <div id="agent-timeline" class="timeline"></div>
+      </section>
 
-    <section class="panel context-panel">
-      <h2>Context Decay</h2>
-      <div class="decay-stats">
-        <div class="stat"><span id="decay-actions">0</span><label>Decays</label></div>
-        <div class="stat"><span id="decay-tokens">0</span><label>Tokens Saved</label></div>
-        <div class="stat"><span id="decay-compactions">0</span><label>Compactions</label></div>
-      </div>
-    </section>
+      <section class="panel routing-panel">
+        <h2>Routing</h2>
+        <div class="routing-bar">
+          <div id="routing-local" class="bar-segment local" style="width: 0%"></div>
+          <div id="routing-claude" class="bar-segment claude" style="width: 100%"></div>
+        </div>
+        <div class="routing-labels">
+          <span id="routing-local-pct">0% local</span>
+          <span id="routing-claude-pct">100% claude</span>
+        </div>
+      </section>
 
-    <section class="panel events-panel">
-      <h2>Event Log</h2>
-      <div id="event-log" class="event-log"></div>
-    </section>
-  </main>
+      <section class="panel tools-panel">
+        <h2>Tools</h2>
+        <div class="tool-stats">
+          <div class="stat"><span id="tools-total">0</span><label>Total</label></div>
+          <div class="stat"><span id="tools-parallel">0</span><label>Parallel</label></div>
+          <div class="stat"><span id="tools-errors">0</span><label>Errors</label></div>
+        </div>
+      </section>
+
+      <section class="panel context-panel">
+        <h2>Context Decay</h2>
+        <div class="decay-stats">
+          <div class="stat"><span id="decay-actions">0</span><label>Decays</label></div>
+          <div class="stat"><span id="decay-tokens">0</span><label>Tokens Saved</label></div>
+          <div class="stat"><span id="decay-compactions">0</span><label>Compactions</label></div>
+        </div>
+      </section>
+
+      <section class="panel events-panel">
+        <h2>Event Log</h2>
+        <div id="event-log" class="event-log"></div>
+      </section>
+    </aside>
+  </div>
 
   <script src="/static/app.js" type="module"></script>
 </body>
