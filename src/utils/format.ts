@@ -14,7 +14,7 @@ export function formatCost(dollars: number): string {
   return `$${dollars.toFixed(2)}`
 }
 
-/** Generate a short random ID */
+/** Generate a short random ID (cryptographically unique) */
 export function shortId(): string {
-  return Math.random().toString(36).slice(2, 10)
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 }

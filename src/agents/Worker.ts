@@ -35,9 +35,11 @@ export async function runWorker(options: WorkerOptions): Promise<TaskNotificatio
   registry.update(id, { status: 'running', controller: childAbort })
   options.onEvent?.(id, 'started')
 
+  // Worker identity goes in the user message (not system prompt) to preserve
+  // cache sharing — all workers must have identical system prompt + tools prefix.
   const messages: Message[] = [{
     role: 'user',
-    content: [{ type: 'text', text: directive }],
+    content: [{ type: 'text', text: `You are worker agent "${name}". Complete the task and respond with a concise summary of what you did and found.\n\n${directive}` }],
     turn: 0,
   }]
 
@@ -45,7 +47,7 @@ export async function runWorker(options: WorkerOptions): Promise<TaskNotificatio
 
   try {
     const loop = queryLoop(messages, {
-      systemPrompt: options.systemPrompt + `\n\nYou are worker agent "${name}". Complete the task and respond with a concise summary of what you did and found.`,
+      systemPrompt: options.systemPrompt,
       tools: options.tools,
       toolExecutor: options.toolExecutor,
       router: options.router,

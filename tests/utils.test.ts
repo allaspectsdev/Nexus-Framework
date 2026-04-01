@@ -125,8 +125,8 @@ describe('formatCost', () => {
 })
 
 describe('shortId', () => {
-  test('returns a string of length 8', () => {
-    expect(shortId().length).toBe(8)
+  test('returns a string of length 12', () => {
+    expect(shortId().length).toBe(12)
   })
 
   test('returns unique ids', () => {

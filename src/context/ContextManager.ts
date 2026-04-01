@@ -146,23 +146,21 @@ export function createContextManager(deps: ContextManagerDeps) {
     /** Get decay stats for the current message history. */
     getStats(messages: Message[], currentTurn: number) {
       let fullCount = 0, summaryCount = 0, stubCount = 0
-      let originalTokens = 0, currentTokens = 0
+      let currentTokens = 0
 
       for (const msg of messages) {
         if (msg.role !== 'user') continue
         for (const block of msg.content) {
           if (block.type !== 'tool_result') continue
           const tier = getDecayTier(msg.turn, currentTurn)
-          const tokens = estimateTokens(block.content)
-          originalTokens += tokens
-          currentTokens += tokens
+          currentTokens += estimateTokens(block.content)
           if (tier === 'full') fullCount++
           else if (tier === 'summary') summaryCount++
           else stubCount++
         }
       }
 
-      return { fullCount, summaryCount, stubCount, originalTokens, currentTokens }
+      return { fullCount, summaryCount, stubCount, currentTokens }
     },
   }
 }

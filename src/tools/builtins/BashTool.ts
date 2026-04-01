@@ -56,10 +56,13 @@ export const BashTool: ToolDefinition<z.infer<typeof inputSchema>> = {
 
         // Truncate long output (Claude Code pattern: 30K chars)
         if (output.length > MAX_OUTPUT_CHARS) {
-          const lines = output.split('\n')
+          const totalLines = output.split('\n').length
           output = output.slice(0, MAX_OUTPUT_CHARS)
-          const remaining = lines.length - output.split('\n').length
-          output += `\n\n... [${remaining} lines truncated] ...`
+          // Trim to last complete line to avoid partial line fragments
+          const lastNewline = output.lastIndexOf('\n')
+          if (lastNewline > 0) output = output.slice(0, lastNewline)
+          const keptLines = output.split('\n').length
+          output += `\n\n... [${totalLines - keptLines} lines truncated] ...`
         }
 
         const parts = [output]

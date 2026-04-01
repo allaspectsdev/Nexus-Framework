@@ -20,7 +20,6 @@ export const GrepTool: ToolDefinition<z.infer<typeof inputSchema>> = {
       const args = ['rg', '--no-heading', '--line-number', '--max-columns', '200']
       if (input.glob) args.push('--glob', input.glob)
       const maxResults = input.max_results ?? 50
-      args.push('--max-count', String(maxResults))
       args.push('--', input.pattern)
       const searchPath = input.path ? assertWithinRoot(input.path) : process.cwd()
       args.push(searchPath)
@@ -38,14 +37,16 @@ export const GrepTool: ToolDefinition<z.infer<typeof inputSchema>> = {
         return { content: `Grep error: ${stderr}`, isError: true }
       }
 
-      const lines = stdout.trim().split('\n').filter(Boolean)
-      const header = `Found ${lines.length} matches:\n`
+      const allLines = stdout.trim().split('\n').filter(Boolean)
+      const totalMatches = allLines.length
+      const lines = allLines.slice(0, maxResults)
 
       // Convert absolute paths to relative
       const cwd = process.cwd()
       const relative = lines.map(l => l.startsWith(cwd) ? l.slice(cwd.length + 1) : l)
 
-      return { content: header + relative.join('\n') }
+      const truncated = totalMatches > maxResults ? `\n\n... (${totalMatches - maxResults} more matches truncated)` : ''
+      return { content: `Found ${totalMatches} matches${totalMatches > maxResults ? ` (showing ${maxResults})` : ''}:\n` + relative.join('\n') + truncated }
     } catch (error) {
       return {
         content: `Error running grep: ${error instanceof Error ? error.message : String(error)}`,

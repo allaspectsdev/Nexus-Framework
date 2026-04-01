@@ -19,18 +19,18 @@ export const ReadFileTool: ToolDefinition<z.infer<typeof inputSchema>> = {
     try {
       const filePath = assertWithinRoot(input.file_path)
       const content = await readFile(filePath, 'utf-8')
-      let lines = content.split('\n')
+      const allLines = content.split('\n')
+      const totalLines = allLines.length
 
       const offset = input.offset ?? 0
       const limit = input.limit ?? 2000
-
-      lines = lines.slice(offset, offset + limit)
+      const lines = allLines.slice(offset, offset + limit)
 
       // Add line numbers (Claude Code's cat -n format)
       const numbered = lines.map((line, i) => `${offset + i + 1}\t${line}`).join('\n')
 
-      const truncated = lines.length < content.split('\n').length
-      const suffix = truncated ? `\n\n(Showing lines ${offset + 1}-${offset + lines.length} of ${content.split('\n').length})` : ''
+      const truncated = lines.length < totalLines
+      const suffix = truncated ? `\n\n(Showing lines ${offset + 1}-${offset + lines.length} of ${totalLines})` : ''
 
       return { content: numbered + suffix }
     } catch (error) {

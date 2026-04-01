@@ -37,9 +37,12 @@ export function createStreamingToolExecutor(
   ): Promise<CompletedTool> {
     const start = performance.now()
     try {
+      // Concurrent tools use siblingAbort (error in one cancels siblings).
+      // Serial tools use parentSignal only (sibling errors shouldn't cancel writes).
+      const signal = concurrent ? siblingAbort.signal : parentSignal
       const result = await definition.call(
         definition.inputSchema.parse(toolUse.input),
-        siblingAbort.signal,
+        signal,
       )
       return {
         toolUse,
