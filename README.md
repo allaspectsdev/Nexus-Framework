@@ -82,6 +82,21 @@ When Nexus runs, a live dashboard is available at **http://localhost:3456** show
 
 ---
 
+## What's Fully Wired
+
+Every system is integrated end-to-end:
+
+- **QueryLoop** calls `ContextManager.applyDecay()` before every API request and invokes `CompactionStrategy.compact()` when context exceeds 80% capacity
+- **StreamingToolExecutor** runs inside the QueryLoop — read-only tools (`ReadFile`, `Grep`) execute in parallel, write tools (`Bash`, `WriteFile`) run serially
+- **ClaudeClient** captures `input_tokens`, `cache_read_input_tokens`, and `cache_creation_input_tokens` from the streaming `message_start` event and passes them through to the `MetricsCollector`
+- **Thinking** is only enabled on models that support it (Claude Sonnet 4+), with a budget capped at 60% of `max_tokens` to leave room for actual output
+- **MCP `nexus_query`** wires through the real QueryLoop with full tool execution, context management, and routing
+- **Dashboard SSE** properly cleans up EventBus listeners on client disconnect
+- **Local model availability** retries on each routing decision if previously unavailable (exo can start after Nexus)
+- **EventBus** receives events from every subsystem: token usage, routing decisions, agent lifecycle, tool execution, context decay, compaction
+
+---
+
 ## Core Concepts
 
 ### 1. Flat State-Machine Query Loop

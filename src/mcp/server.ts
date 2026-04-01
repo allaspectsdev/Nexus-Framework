@@ -3,11 +3,22 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import type { MetricsCollector } from '../observability/MetricsCollector.js'
 import type { AgentRegistry } from '../agents/AgentRegistry.js'
+import type { QueryLoopOptions } from '../engine/QueryLoop.js'
+import type { NexusConfig } from '../config.js'
+import { queryLoop } from '../engine/QueryLoop.js'
+import type { Message } from '../engine/types.js'
 
-export function createMcpServer(
-  metricsCollector: MetricsCollector,
-  agentRegistry?: AgentRegistry,
-) {
+export type McpServerDeps = {
+  metricsCollector: MetricsCollector
+  agentRegistry?: AgentRegistry
+  /** Provide these to enable nexus_query — omit for metrics-only mode */
+  queryDeps?: Omit<QueryLoopOptions, 'onEvent' | 'onRoute' | 'onTransition' | 'onContextAction' | 'signal' | 'maxTurns' | 'purpose'>
+  config?: NexusConfig
+}
+
+export function createMcpServer(deps: McpServerDeps) {
+  const { metricsCollector, agentRegistry } = deps
+
   const server = new McpServer({
     name: 'nexus',
     version: '0.1.0',
@@ -38,11 +49,41 @@ export function createMcpServer(
     'Run a query through Nexus hybrid routing engine (local + Claude)',
     { query: z.string().describe('The query to process') },
     async ({ query }) => {
-      // This is a placeholder — in production, this would wire into the QueryLoop
+      if (!deps.queryDeps) {
+        return {
+          content: [{
+            type: 'text',
+            text: `MCP server running in metrics-only mode. Query: "${query}"\nStatus: ${JSON.stringify(metricsCollector.getSavings())}`,
+          }],
+        }
+      }
+
+      // Wire through the real QueryLoop
+      const messages: Message[] = [{
+        role: 'user',
+        content: [{ type: 'text', text: query }],
+        turn: 0,
+      }]
+
+      let responseText = ''
+      const loop = queryLoop(messages, {
+        ...deps.queryDeps,
+        maxTurns: 10,
+        purpose: 'reason',
+      })
+
+      let result = await loop.next()
+      while (!result.done) {
+        if (result.value.type === 'text_delta') {
+          responseText += result.value.text
+        }
+        result = await loop.next()
+      }
+
       return {
         content: [{
           type: 'text',
-          text: `Nexus received query: "${query}"\nCurrent status: ${JSON.stringify(metricsCollector.getSavings())}`,
+          text: responseText || `Query completed with status: ${result.value.reason}`,
         }],
       }
     },
@@ -57,11 +98,31 @@ export function createMcpServer(
       value: z.number(),
     },
     async ({ setting, value }) => {
+      if (deps.config) {
+        switch (setting) {
+          case 'routing_threshold':
+            deps.config.routingComplexityThreshold = value
+            break
+          case 'decay_full_turns':
+            deps.config.contextDecayFullTurns = value
+            break
+          case 'decay_summary_turns':
+            deps.config.contextDecaySummaryTurns = value
+            break
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: `Configuration updated: ${setting} = ${value}`,
+          }],
+        }
+      }
       return {
         content: [{
           type: 'text',
-          text: `Configuration updated: ${setting} = ${value}`,
+          text: `Cannot update configuration in metrics-only mode`,
         }],
+        isError: true,
       }
     },
   )
@@ -74,7 +135,11 @@ export function createMcpServer(
       contents: [{
         uri: uri.href,
         mimeType: 'application/json',
-        text: JSON.stringify(metricsCollector.getMetrics(), null, 2),
+        text: JSON.stringify({
+          metrics: metricsCollector.getMetrics(),
+          savings: metricsCollector.getSavings(),
+          uptime: metricsCollector.getUptime(),
+        }, null, 2),
       }],
     }),
   )

@@ -54,8 +54,8 @@ export function createRouter(deps: RouterDeps) {
 
   return {
     async route(messages: Message[], purpose?: string): Promise<RoutingDecision> {
-      // Check local availability (cached after first check)
-      if (localAvailable === null) {
+      // Check local availability (retries if previously unavailable)
+      if (localAvailable !== true) {
         localAvailable = await deps.localClient.isAvailable()
       }
 

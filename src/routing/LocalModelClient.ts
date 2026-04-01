@@ -101,7 +101,8 @@ export function createLocalModelClient(endpoint: string, defaultModel: string): 
     },
 
     async isAvailable(): Promise<boolean> {
-      if (available !== null) return available
+      // Only cache positive results; retry on failure (exo may start late)
+      if (available === true) return true
       try {
         const resp = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(3000) })
         available = resp.ok

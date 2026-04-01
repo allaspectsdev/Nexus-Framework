@@ -45,6 +45,13 @@ function addCacheBreakpoints(messages: APIMessage[]): APIMessage[] {
   return result
 }
 
+// Models that support extended thinking
+const THINKING_MODELS = /claude-(sonnet-4|opus-4)/i
+
+function supportsThinking(model: string): boolean {
+  return THINKING_MODELS.test(model)
+}
+
 export function createClaudeClient(apiKey: string): ModelClient {
   const client = new Anthropic({ apiKey })
 
@@ -54,28 +61,59 @@ export function createClaudeClient(apiKey: string): ModelClient {
     async *stream(options: ModelCallOptions): AsyncGenerator<StreamEvent> {
       const apiMessages = addCacheBreakpoints(toAPIMessages(options.messages))
 
-      const response = await client.messages.create({
-        model: options.model,
-        max_tokens: options.maxTokens,
-        thinking: { type: 'enabled', budget_tokens: Math.min(options.maxTokens - 1, 10000) },
-        system: [{
-          type: 'text',
-          text: options.systemPrompt,
-          cache_control: { type: 'ephemeral' },
-        }],
-        messages: apiMessages,
-        tools: options.tools.map(t => ({
-          name: t.name,
-          description: t.description,
-          input_schema: t.input_schema as Anthropic.Tool.InputSchema,
-        })),
-        stream: true,
-      })
+      // Only enable thinking on supported models, and reserve reasonable budget
+      const thinkingEnabled = supportsThinking(options.model)
+      const thinkingBudget = Math.min(Math.floor(options.maxTokens * 0.6), 10000)
+
+      const tools = options.tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema as Anthropic.Tool.InputSchema,
+      }))
+
+      const systemBlocks: Anthropic.TextBlockParam[] = [{
+        type: 'text',
+        text: options.systemPrompt,
+        cache_control: { type: 'ephemeral' },
+      }]
+
+      const response = thinkingEnabled
+        ? await client.messages.create({
+            model: options.model,
+            max_tokens: options.maxTokens,
+            thinking: { type: 'enabled', budget_tokens: thinkingBudget },
+            system: systemBlocks,
+            messages: apiMessages,
+            tools,
+            stream: true,
+          })
+        : await client.messages.create({
+            model: options.model,
+            max_tokens: options.maxTokens,
+            system: systemBlocks,
+            messages: apiMessages,
+            tools,
+            stream: true,
+          })
 
       const contentBlocks: Map<number, { type: string; id?: string; name?: string; inputJson: string; text: string; thinking: string }> = new Map()
 
+      // Capture input usage from message_start, carry forward to message_complete
+      let capturedInputUsage = { inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }
+
       for await (const event of response) {
         switch (event.type) {
+          case 'message_start': {
+            const usage = event.message?.usage as unknown as Record<string, number> | undefined
+            if (usage) {
+              capturedInputUsage = {
+                inputTokens: usage.input_tokens ?? 0,
+                cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+                cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+              }
+            }
+            break
+          }
           case 'content_block_start': {
             const block = event.content_block
             contentBlocks.set(event.index, {
@@ -131,30 +169,23 @@ export function createClaudeClient(apiKey: string): ModelClient {
             }
 
             const usage = event.usage
+            const stopReason = ((event.delta as unknown as Record<string, unknown>).stop_reason as string) ?? 'end_turn'
             yield {
               type: 'message_complete',
               message: {
                 role: 'assistant',
                 content: assistantContent,
-                turn: 0, // filled by QueryLoop
+                turn: 0,
                 provider: 'claude',
                 tokenEstimate: estimateTokens(JSON.stringify(assistantContent)),
               },
-              stopReason: (event.delta as { stop_reason?: string }).stop_reason as StreamEvent extends { type: 'message_complete' } ? StreamEvent['stopReason'] : never ?? 'end_turn',
+              stopReason: stopReason as 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence',
               usage: {
-                inputTokens: 0, // filled from message_start
+                inputTokens: capturedInputUsage.inputTokens,
                 outputTokens: usage?.output_tokens ?? 0,
-                cacheReadTokens: 0,
-                cacheCreationTokens: 0,
+                cacheReadTokens: capturedInputUsage.cacheReadTokens,
+                cacheCreationTokens: capturedInputUsage.cacheCreationTokens,
               },
-            }
-            break
-          }
-          case 'message_start': {
-            // Capture input token usage from the message_start event
-            const usage = event.message?.usage
-            if (usage) {
-              // We'll emit this with message_complete
             }
             break
           }

@@ -50,15 +50,6 @@ const compactionStrategy = createCompactionStrategy(config, localClient)
 // Dashboard
 const dashboard = createDashboardServer(config.dashboardPort, metricsCollector, eventBus)
 
-// --- MCP Mode ---
-if (isMcp) {
-  const { createMcpServer } = await import('./mcp/server.js')
-  const mcpServer = createMcpServer(metricsCollector)
-  await mcpServer.startStdio()
-  // MCP server runs until stdin closes
-  await new Promise(() => {}) // block forever
-}
-
 // --- System prompt ---
 const SYSTEM_PROMPT = `You are Nexus, a hybrid AI agent that routes work between local models and Claude API for maximum efficiency.
 
@@ -75,6 +66,28 @@ When analyzing a codebase:
 4. Provide a clear, structured summary
 
 Be concise and actionable. Focus on what matters.`
+
+// --- MCP Mode ---
+if (isMcp) {
+  const { createMcpServer } = await import('./mcp/server.js')
+  const mcpServer = createMcpServer({
+    metricsCollector,
+    config,
+    queryDeps: {
+      systemPrompt: SYSTEM_PROMPT,
+      tools: toolRegistry.getSchemas(),
+      toolExecutor: toolRegistry,
+      toolRegistry,
+      contextManager,
+      compactionStrategy,
+      router,
+      config,
+    },
+  })
+  await mcpServer.startStdio()
+  // MCP server runs until stdin closes
+  await new Promise(() => {}) // block forever
+}
 
 // --- Main execution ---
 async function main() {
@@ -119,13 +132,13 @@ async function main() {
       signal: abortController.signal,
       onEvent(event, data) {
         if (event === 'worker_spawned') {
-          const d = data as { name: string; purpose: string }
+          const d = data as { id: string; name: string; purpose: string }
           terminalUI.log(chalk.magenta(`  Agent spawned: ${d.name}`) + chalk.dim(` — ${d.purpose}`))
-          eventBus.emit({ type: 'agent_lifecycle', agentId: '', name: d.name, status: 'running' })
+          eventBus.emit({ type: 'agent_lifecycle', agentId: d.id, name: d.name, status: 'running' })
         } else if (event === 'worker_completed') {
-          const d = data as { name: string; usage: { totalTokens: number; durationMs: number } }
+          const d = data as { taskId: string; name: string; usage: { totalTokens: number; durationMs: number } }
           terminalUI.log(chalk.green(`  Agent done: ${d.name}`))
-          eventBus.emit({ type: 'agent_lifecycle', agentId: '', name: d.name, status: 'completed', durationMs: d.usage?.durationMs })
+          eventBus.emit({ type: 'agent_lifecycle', agentId: d.taskId, name: d.name, status: 'completed', durationMs: d.usage?.durationMs })
         }
         terminalUI.render()
       },
@@ -162,6 +175,9 @@ async function main() {
       systemPrompt: SYSTEM_PROMPT,
       tools: toolRegistry.getSchemas(),
       toolExecutor: toolRegistry,
+      toolRegistry,
+      contextManager,
+      compactionStrategy,
       router,
       config,
       signal: abortController.signal,
@@ -199,6 +215,14 @@ async function main() {
         if (transition.type === 'terminal') {
           terminalUI.log(chalk.dim(`\n  Finished: ${transition.reason}`))
         }
+      },
+      onContextAction(action) {
+        if (action.type === 'compact') {
+          eventBus.emit({ type: 'compaction', tokensBefore: 0, tokensAfter: 0, tokensSaved: action.tokensSaved })
+        } else {
+          eventBus.emit({ type: 'context_decay', tier: action.type, tokensSaved: action.tokensSaved, messageCount: 1 })
+        }
+        terminalUI.render()
       },
     })
 

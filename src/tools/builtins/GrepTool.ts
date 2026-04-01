@@ -24,12 +24,15 @@ export const GrepTool: ToolDefinition<z.infer<typeof inputSchema>> = {
       args.push(input.path ?? process.cwd())
 
       const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' })
-      const stdout = await new Response(proc.stdout).text()
+      // Read stdout and stderr concurrently before awaiting exit (avoids race)
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
       const exitCode = await proc.exited
 
       if (exitCode === 1) return { content: 'No matches found.' }
       if (exitCode !== 0) {
-        const stderr = await new Response(proc.stderr).text()
         return { content: `Grep error: ${stderr}`, isError: true }
       }
 

@@ -22,8 +22,22 @@ function formatDuration(ms) {
   return (ms / 1000).toFixed(1) + 's'
 }
 
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000) % 60
+  const m = Math.floor(ms / 60000) % 60
+  const h = Math.floor(ms / 3600000)
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
+}
+
 function updateMetrics(data) {
   const { metrics: m, savings: s } = data
+
+  // Update uptime display
+  if (data.uptime) {
+    $('#uptime').textContent = formatUptime(data.uptime)
+  }
 
   // Savings panel
   $('#savings-pct').textContent = s.percentSaved.toFixed(0) + '%'
@@ -184,19 +198,24 @@ function connect() {
 
 // --- Init ---
 
-window.addEventListener('DOMContentLoaded', () => {
+function initCanvas() {
   canvas = $('#token-chart')
-  // Set canvas resolution for retina
-  const dpr = window.devicePixelRatio || 1
-  canvas.width = canvas.offsetWidth * dpr
-  canvas.height = canvas.offsetHeight * dpr
-  ctx = canvas.getContext('2d')
-  ctx.scale(dpr, dpr)
+  // Wait for layout to complete before reading dimensions
+  requestAnimationFrame(() => {
+    const dpr = window.devicePixelRatio || 1
+    const w = canvas.offsetWidth || 400
+    const h = canvas.offsetHeight || 200
+    canvas.width = w * dpr
+    canvas.height = h * dpr
+    ctx = canvas.getContext('2d')
+    ctx.scale(dpr, dpr)
+  })
+}
 
+window.addEventListener('DOMContentLoaded', () => {
+  initCanvas()
   connect()
 
-  // Update uptime
-  setInterval(() => {
-    // uptime is handled server-side via metrics
-  }, 1000)
+  // Re-init canvas on resize
+  window.addEventListener('resize', initCanvas)
 })

@@ -10,7 +10,6 @@ import { formatCost, formatDuration } from '../utils/format.js'
  */
 export function createTerminalUI(eventBus: EventBus, metricsCollector: MetricsCollector) {
   let lastLineCount = 0
-  let streamBuffer = ''
   let isStreaming = false
 
   function clearLines(count: number) {

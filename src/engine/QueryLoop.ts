@@ -2,6 +2,10 @@ import type { Message, StreamEvent, ToolSchema, ContentBlock, ToolUseBlock, Toke
 import type { Terminal, Continue, Transition } from './transitions.js'
 import type { Router } from '../routing/Router.js'
 import type { NexusConfig } from '../config.js'
+import type { ContextManager } from '../context/ContextManager.js'
+import type { CompactionStrategy } from '../context/CompactionStrategy.js'
+import type { ToolRegistry } from '../tools/ToolRegistry.js'
+import { createStreamingToolExecutor } from '../tools/StreamingToolExecutor.js'
 import { estimateMessageTokens } from '../utils/tokens.js'
 
 export type ToolExecutor = {
@@ -12,8 +16,14 @@ export type QueryLoopOptions = {
   systemPrompt: string
   tools: ToolSchema[]
   toolExecutor: ToolExecutor
+  /** Full registry needed for StreamingToolExecutor concurrency checks */
+  toolRegistry?: ToolRegistry
   router: Router
   config: NexusConfig
+  /** Context decay engine — applies tiered decay before each API call */
+  contextManager?: ContextManager
+  /** Compaction strategy — summarizes old messages when context is too large */
+  compactionStrategy?: CompactionStrategy
   maxTurns?: number
   signal?: AbortSignal
   /** Optional purpose hint for routing (e.g., 'summarize', 'reason') */
@@ -73,6 +83,29 @@ export async function* queryLoop(
       const terminal: Terminal = { type: 'terminal', reason: 'max_turns' }
       options.onTransition?.(terminal)
       return terminal
+    }
+
+    // --- Pre-flight: context management ---
+    // Apply tiered decay (full → summary → stub) to old tool results
+    if (options.contextManager) {
+      const { messages: decayed, actions } = await options.contextManager.applyDecay(state.messages, state.turnCount)
+      state.messages = decayed
+      for (const action of actions) {
+        options.onContextAction?.({ type: action.type, tokensSaved: action.tokensSaved })
+      }
+    }
+
+    // Check if compaction is needed (context too large)
+    if (options.compactionStrategy?.shouldCompact(state.messages)) {
+      const { messages: compacted, tokensSaved } = await options.compactionStrategy.compact(state.messages)
+      if (tokensSaved > 0) {
+        state.messages = compacted
+        options.onContextAction?.({ type: 'compact', tokensSaved })
+        const cont: Continue = { type: 'continue', reason: 'compact_retry' }
+        options.onTransition?.(cont)
+        state.transition = cont
+        continue
+      }
     }
 
     // --- Route to model ---
@@ -165,24 +198,39 @@ export async function* queryLoop(
     if (stopReason === 'tool_use' && toolUseBlocks.length > 0) {
       const toolResults: ContentBlock[] = []
 
-      // Execute tools — concurrent for read-only, serial for writes
-      // (StreamingToolExecutor handles this in Phase 3, here we do simple serial)
-      for (const toolUse of toolUseBlocks) {
-        try {
-          const result = await options.toolExecutor.execute(toolUse, options.signal)
+      if (options.toolRegistry) {
+        // Use StreamingToolExecutor for concurrent read-only / serial write execution
+        const executor = createStreamingToolExecutor(options.toolRegistry, options.signal)
+        for (const toolUse of toolUseBlocks) {
+          executor.addTool(toolUse)
+        }
+        for await (const completed of executor.drain()) {
           toolResults.push({
             type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: result.content,
-            is_error: result.isError,
+            tool_use_id: completed.toolUse.id,
+            content: completed.result.content,
+            is_error: completed.result.isError,
           })
-        } catch (error) {
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Tool execution error: ${error instanceof Error ? error.message : String(error)}`,
-            is_error: true,
-          })
+        }
+      } else {
+        // Fallback: simple serial execution
+        for (const toolUse of toolUseBlocks) {
+          try {
+            const result = await options.toolExecutor.execute(toolUse, options.signal)
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUse.id,
+              content: result.content,
+              is_error: result.isError,
+            })
+          } catch (error) {
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUse.id,
+              content: `Tool execution error: ${error instanceof Error ? error.message : String(error)}`,
+              is_error: true,
+            })
+          }
         }
       }
 
