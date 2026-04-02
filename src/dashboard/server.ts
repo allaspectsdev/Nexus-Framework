@@ -7,6 +7,7 @@ import type { MetricsCollector } from '../observability/MetricsCollector.js'
 import type { EventBus } from '../observability/EventBus.js'
 import type { QueryLoopOptions } from '../engine/QueryLoop.js'
 import type { Message } from '../engine/types.js'
+import type { ConversationStore } from '../db/ConversationStore.js'
 import { queryLoop } from '../engine/QueryLoop.js'
 import { runCoordinator } from '../agents/Coordinator.js'
 
@@ -19,6 +20,7 @@ export type QueryDeps = Omit<QueryLoopOptions, 'onEvent' | 'onRoute' | 'onTransi
 const querySchema = z.object({
   query: z.string().min(1),
   mode: z.enum(['single', 'multi']).default('single'),
+  conversationId: z.string().optional(),
 })
 
 export function createDashboardServer(
@@ -26,6 +28,7 @@ export function createDashboardServer(
   metricsCollector: MetricsCollector,
   eventBus: EventBus,
   queryDeps?: QueryDeps,
+  conversationStore?: ConversationStore,
 ) {
   const app = new Hono()
 
@@ -111,6 +114,45 @@ export function createDashboardServer(
     })
   })
 
+  // --- Conversation CRUD ---
+
+  app.get('/api/conversations', (c) => {
+    if (!conversationStore) return c.json([])
+    const limit = parseInt(c.req.query('limit') ?? '50')
+    const offset = parseInt(c.req.query('offset') ?? '0')
+    return c.json(conversationStore.list(limit, offset))
+  })
+
+  app.post('/api/conversations', async (c) => {
+    if (!conversationStore) return c.json({ error: 'Database not available' }, 503)
+    const body = await c.req.json()
+    const title = body?.title ?? 'New conversation'
+    const mode = body?.mode ?? 'single'
+    const conv = conversationStore.create(title, mode)
+    return c.json(conv)
+  })
+
+  app.get('/api/conversations/:id', (c) => {
+    if (!conversationStore) return c.json({ error: 'Database not available' }, 503)
+    const conv = conversationStore.get(c.req.param('id'))
+    if (!conv) return c.json({ error: 'Not found' }, 404)
+    return c.json(conv)
+  })
+
+  app.delete('/api/conversations/:id', (c) => {
+    if (!conversationStore) return c.json({ error: 'Database not available' }, 503)
+    const deleted = conversationStore.delete(c.req.param('id'))
+    if (!deleted) return c.json({ error: 'Not found' }, 404)
+    return c.json({ ok: true })
+  })
+
+  app.put('/api/conversations/:id/title', async (c) => {
+    if (!conversationStore) return c.json({ error: 'Database not available' }, 503)
+    const body = await c.req.json()
+    conversationStore.updateTitle(c.req.param('id'), body?.title ?? 'Untitled')
+    return c.json({ ok: true })
+  })
+
   // POST /api/query — run a query through the engine and stream events back
   app.post('/api/query', async (c) => {
     if (!queryDeps) {
@@ -122,9 +164,24 @@ export function createDashboardServer(
       return c.json({ error: body.error.issues[0]?.message ?? 'Invalid request' }, 400)
     }
 
-    const { query, mode } = body.data
+    const { query, mode, conversationId: existingConvId } = body.data
     let queryAbort: AbortController | undefined
     let closed = false
+
+    // Create or use existing conversation
+    let convId = existingConvId
+    if (conversationStore && !convId) {
+      const conv = conversationStore.create(query.slice(0, 80), mode)
+      convId = conv.id
+    }
+    // Save the user message
+    if (conversationStore && convId) {
+      conversationStore.addMessage(convId, {
+        role: 'user',
+        content: [{ type: 'text', text: query }],
+        turn: 0,
+      })
+    }
 
     return c.newResponse(
       new ReadableStream({
@@ -140,11 +197,33 @@ export function createDashboardServer(
           }
 
           queryAbort = new AbortController()
-          const messages: Message[] = [{
-            role: 'user',
-            content: [{ type: 'text', text: query }],
-            turn: 0,
-          }]
+
+          // Load conversation history for multi-turn context
+          const priorMessages: Message[] = []
+          if (conversationStore && convId && existingConvId) {
+            const conv = conversationStore.get(convId)
+            if (conv) {
+              priorMessages.push(...conv.messages)
+            }
+          }
+
+          const turnOffset = priorMessages.length > 0
+            ? Math.max(...priorMessages.map(m => m.turn)) + 1
+            : 0
+
+          const messages: Message[] = [
+            ...priorMessages,
+            { role: 'user', content: [{ type: 'text', text: query }], turn: turnOffset },
+          ]
+          // Save messages to conversation as they arrive
+          const saveMessage = (msg: Message) => {
+            if (conversationStore && convId) {
+              conversationStore.addMessage(convId, msg)
+            }
+          }
+
+          // Tell client which conversation this belongs to
+          if (convId) send({ type: 'conversation_id', conversationId: convId })
 
           try {
             if (mode === 'single') {
@@ -162,6 +241,7 @@ export function createDashboardServer(
                     eventBus.emit({ type: 'tool_execution', tool: event.name, durationMs: 0, concurrent: false, isError: false })
                   }
                   if (event.type === 'message_complete') {
+                    saveMessage(event.message)
                     eventBus.emit({
                       type: 'token_usage',
                       provider: event.message.provider ?? 'claude',
@@ -189,7 +269,7 @@ export function createDashboardServer(
               while (!result.done) {
                 result = await loop.next()
               }
-              send({ type: 'done', reason: result.value.reason })
+              send({ type: 'done', reason: result.value.reason, conversationId: convId })
             } else {
               // Multi-agent mode
               const coordinator = runCoordinator({
@@ -216,6 +296,7 @@ export function createDashboardServer(
               for await (const event of coordinator) {
                 send(event)
                 if (event.type === 'message_complete') {
+                  saveMessage(event.message)
                   eventBus.emit({
                     type: 'token_usage',
                     provider: event.message.provider ?? 'claude',
@@ -226,7 +307,7 @@ export function createDashboardServer(
                   })
                 }
               }
-              send({ type: 'done', reason: 'completed' })
+              send({ type: 'done', reason: 'completed', conversationId: convId })
             }
           } catch (err) {
             if (!queryAbort?.signal.aborted) {

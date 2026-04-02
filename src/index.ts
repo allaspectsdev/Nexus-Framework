@@ -23,9 +23,11 @@ import { formatCost } from './utils/format.js'
 import { formatTokens } from './utils/tokens.js'
 import { createMemoryStore } from './observer/MemoryStore.js'
 import { createObserverManager } from './observer/ObserverManager.js'
+import { createMcpClientManager, type McpClientManager } from './mcp/client.js'
 import { createSafetyObserver } from './observer/builtins/SafetyObserver.js'
 import { createMemoryObserver } from './observer/builtins/MemoryObserver.js'
 import { createCostObserver } from './observer/builtins/CostObserver.js'
+import { createConversationStore } from './db/ConversationStore.js'
 
 // --- Parse CLI args ---
 const args = process.argv.slice(2)
@@ -49,6 +51,28 @@ const router = createRouter({ config, localClient, claudeClient })
 
 // Tools
 const toolRegistry = createToolRegistry([ReadFileTool, BashTool, GrepTool, WriteFileTool])
+
+// MCP client — connect to external MCP servers and register their tools
+let mcpManager: McpClientManager | undefined
+if (config.mcpServers.length > 0) {
+  mcpManager = await createMcpClientManager(config.mcpServers)
+  const externalTools = mcpManager.getTools()
+  if (externalTools.length > 0) {
+    toolRegistry.registerTools(externalTools)
+  }
+} else {
+  // Also check for .nexus/mcp.json file
+  try {
+    const mcpFile = Bun.file(`${process.cwd()}/.nexus/mcp.json`)
+    if (await mcpFile.exists()) {
+      const mcpConfig = JSON.parse(await mcpFile.text())
+      if (Array.isArray(mcpConfig.servers) && mcpConfig.servers.length > 0) {
+        mcpManager = await createMcpClientManager(mcpConfig.servers)
+        toolRegistry.registerTools(mcpManager.getTools())
+      }
+    }
+  } catch {}
+}
 
 // Context management
 const contextManager = createContextManager({ config, localClient })
@@ -82,15 +106,21 @@ When analyzing a codebase:
 Be concise and actionable. Focus on what matters.${memoryBlock ? '\n\n' + memoryBlock : ''}`
 
 // Shared query dependencies — reused by CLI, MCP, and web UI
+// tools uses a getter so dynamically registered tools (MCP) are always included
 const queryDeps = {
   systemPrompt: SYSTEM_PROMPT,
-  tools: toolRegistry.getSchemas(),
+  get tools() { return toolRegistry.getSchemas() },
   toolExecutor: toolRegistry,
   toolRegistry,
   contextManager,
   compactionStrategy,
   router,
   config,
+  // Observer hook — fires at every turn boundary across all query paths
+  async onTurnComplete(snapshot: import('./observer/types.js').TurnSnapshot) {
+    const trigger = snapshot.transition.type === 'terminal' ? 'on_complete' as const : 'every_turn' as const
+    await observerManager.notify(trigger, snapshot)
+  },
 }
 
 // Observer system — meta-cognitive side-inference
@@ -108,7 +138,10 @@ if (config.observersEnabled) {
 }
 
 // Dashboard (receives queryDeps to serve the interactive web UI)
-const dashboard = createDashboardServer(config.dashboardPort, metricsCollector, eventBus, queryDeps)
+// Conversation persistence
+const conversationStore = createConversationStore(`${process.cwd()}/${config.dbPath}`)
+
+const dashboard = createDashboardServer(config.dashboardPort, metricsCollector, eventBus, queryDeps, conversationStore)
 
 // --- MCP Mode ---
 if (isMcp) {
@@ -155,10 +188,12 @@ async function main() {
     // 2. Drain in-flight observers
     observerManager.drain().catch(() => {})
     observerManager.destroy()
+    mcpManager?.destroy().catch(() => {})
 
-    // 3. Clean up observability (release EventBus listeners)
+    // 3. Clean up observability and database
     terminalUI.destroy()
     metricsCollector.destroy()
+    conversationStore.close()
 
     // 4. Stop the dashboard HTTP server
     server.stop()
@@ -191,6 +226,7 @@ async function main() {
       router,
       config,
       signal: abortController.signal,
+      onTurnComplete: queryDeps.onTurnComplete,
       onEvent(event, data) {
         if (event === 'worker_spawned') {
           const d = data as { id: string; name: string; purpose: string }
@@ -285,10 +321,7 @@ async function main() {
         }
         terminalUI.render()
       },
-      async onTurnComplete(snapshot) {
-        const trigger = snapshot.transition.type === 'terminal' ? 'on_complete' : 'every_turn'
-        await observerManager.notify(trigger, snapshot)
-      },
+      onTurnComplete: queryDeps.onTurnComplete,
     })
 
     let result = await loop.next()
@@ -309,8 +342,10 @@ async function main() {
   // Clean up
   await observerManager.drain()
   observerManager.destroy()
+  await mcpManager?.destroy()
   terminalUI.destroy()
   metricsCollector.destroy()
+  conversationStore.close()
   server.stop()
 }
 

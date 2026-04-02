@@ -7,6 +7,7 @@ export function createToolRegistry(tools: ToolDefinition[]): ToolExecutor & {
   getSchemas(): ToolSchema[]
   getTool(name: string): ToolDefinition | undefined
   getTools(): ToolDefinition[]
+  registerTools(newTools: ToolDefinition[]): void
 } {
   const toolMap = new Map<string, ToolDefinition>()
   for (const tool of tools) {
@@ -15,7 +16,7 @@ export function createToolRegistry(tools: ToolDefinition[]): ToolExecutor & {
 
   return {
     getSchemas(): ToolSchema[] {
-      return tools.map(toolToSchema)
+      return [...toolMap.values()].map(toolToSchema)
     },
 
     getTool(name: string): ToolDefinition | undefined {
@@ -23,7 +24,14 @@ export function createToolRegistry(tools: ToolDefinition[]): ToolExecutor & {
     },
 
     getTools(): ToolDefinition[] {
-      return tools
+      return [...toolMap.values()]
+    },
+
+    /** Register additional tools dynamically (e.g., from MCP servers). */
+    registerTools(newTools: ToolDefinition[]): void {
+      for (const tool of newTools) {
+        toolMap.set(tool.name, tool)
+      }
     },
 
     async execute(toolUse: ToolUseBlock, signal?: AbortSignal): Promise<ToolResult> {

@@ -1,4 +1,5 @@
 import type { Message, ToolSchema } from '../engine/types.js'
+import type { TurnSnapshot } from '../observer/types.js'
 import type { Router } from '../routing/Router.js'
 import type { NexusConfig } from '../config.js'
 import type { ToolExecutor } from '../engine/QueryLoop.js'
@@ -19,6 +20,7 @@ export type WorkerOptions = {
   registry: AgentRegistry
   parentSignal?: AbortSignal
   onEvent?: (agentId: AgentId, event: string) => void
+  onTurnComplete?: (snapshot: TurnSnapshot) => void | Promise<void>
 }
 
 /**
@@ -55,6 +57,7 @@ export async function runWorker(options: WorkerOptions): Promise<TaskNotificatio
       maxTurns: 20,
       signal: childAbort.signal,
       purpose: 'reason',
+      onTurnComplete: options.onTurnComplete,
       onEvent(event) {
         if (event.type === 'message_complete') {
           totalTokens += event.usage.inputTokens + event.usage.outputTokens

@@ -17,6 +17,10 @@ let currentThinkingText = ''
 let currentAbortController = null
 let messageCounter = 0
 
+// Conversation state
+let currentConversationId = null
+let conversations = []
+
 // --- Formatters ---
 
 function formatTokens(n) {
@@ -344,7 +348,7 @@ async function submitQuery() {
     const response = await fetch('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, mode: currentMode }),
+      body: JSON.stringify({ query, mode: currentMode, conversationId: currentConversationId }),
       signal: currentAbortController.signal,
     })
 
@@ -511,6 +515,11 @@ function handleStreamEvent(event, assistantMsg) {
       break
     }
 
+    case 'conversation_id': {
+      currentConversationId = event.conversationId
+      break
+    }
+
     case 'done': {
       // Final render — remove cursor
       if (currentResponseEl && typeof marked !== 'undefined' && currentResponseText) {
@@ -518,6 +527,10 @@ function handleStreamEvent(event, assistantMsg) {
       }
       const cursor = assistantMsg.querySelector('.streaming-cursor')
       if (cursor) cursor.remove()
+      // Update conversation ID if returned
+      if (event.conversationId) currentConversationId = event.conversationId
+      // Refresh sidebar to show new/updated conversation
+      loadConversations()
       scrollToBottom()
       break
     }
@@ -535,6 +548,89 @@ function showError(assistantMsg, message) {
   errDiv.textContent = 'Error: ' + message
   assistantMsg.appendChild(errDiv)
   scrollToBottom()
+}
+
+// --- Conversation Sidebar ---
+
+async function loadConversations() {
+  try {
+    const resp = await fetch('/api/conversations')
+    conversations = await resp.json()
+    renderConversationList()
+  } catch {}
+}
+
+function renderConversationList() {
+  const list = $('#conversation-list')
+  list.innerHTML = ''
+
+  for (const conv of conversations) {
+    const item = document.createElement('div')
+    item.className = `conversation-item${conv.id === currentConversationId ? ' active' : ''}`
+    item.dataset.id = conv.id
+
+    const title = document.createElement('div')
+    title.className = 'conv-title'
+    title.textContent = conv.title
+
+    const meta = document.createElement('div')
+    meta.className = 'conv-meta'
+
+    const mode = document.createElement('span')
+    mode.className = 'conv-mode'
+    mode.textContent = conv.mode
+
+    const time = document.createElement('span')
+    time.textContent = new Date(conv.updatedAt).toLocaleDateString()
+
+    meta.appendChild(mode)
+    meta.appendChild(time)
+    item.appendChild(title)
+    item.appendChild(meta)
+
+    item.addEventListener('click', () => selectConversation(conv.id))
+    list.appendChild(item)
+  }
+}
+
+async function selectConversation(id) {
+  if (isQuerying) return
+  try {
+    const resp = await fetch(`/api/conversations/${id}`)
+    const data = await resp.json()
+    if (!data.messages) return
+
+    currentConversationId = id
+
+    // Clear chat and render messages
+    const chat = $('#chat-messages')
+    chat.innerHTML = ''
+
+    for (const msg of data.messages) {
+      if (msg.role === 'user') {
+        const textContent = msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+        appendUserMessage(textContent)
+      } else if (msg.role === 'assistant') {
+        const textContent = msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+        const assistantDiv = createAssistantMessage()
+        if (typeof marked !== 'undefined' && textContent) {
+          assistantDiv.innerHTML = marked.parse(textContent)
+        } else {
+          assistantDiv.textContent = textContent
+        }
+      }
+    }
+
+    renderConversationList()
+    scrollToBottom()
+  } catch {}
+}
+
+function startNewConversation() {
+  currentConversationId = null
+  const chat = $('#chat-messages')
+  chat.innerHTML = '<div class="welcome-message"><h2>Nexus Hybrid Agent</h2><p>Submit a query to run through the hybrid routing engine.</p></div>'
+  renderConversationList()
 }
 
 // --- Canvas ---
@@ -576,6 +672,12 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     if (hasRunning) renderTimeline()
   }, 1000)
+
+  // Load conversation history
+  loadConversations()
+
+  // New Chat button
+  $('#new-conversation-btn').addEventListener('click', startNewConversation)
 
   // Mode toggle
   $('#mode-single').addEventListener('click', () => {

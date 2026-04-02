@@ -1,4 +1,5 @@
 import type { Message, ToolSchema, StreamEvent } from '../engine/types.js'
+import type { TurnSnapshot } from '../observer/types.js'
 import type { Router } from '../routing/Router.js'
 import type { NexusConfig } from '../config.js'
 import type { ToolRegistry } from '../tools/ToolRegistry.js'
@@ -17,6 +18,7 @@ export type CoordinatorOptions = {
   config: NexusConfig
   signal?: AbortSignal
   onEvent?: (event: string, data?: unknown) => void
+  onTurnComplete?: (snapshot: TurnSnapshot) => void | Promise<void>
 }
 
 const COORDINATOR_PROMPT = `You are a coordinator agent. Your job is to break down tasks and delegate to worker agents.
@@ -68,6 +70,7 @@ export async function* runCoordinator(
       config: options.config,
       registry,
       parentSignal: options.signal,
+      onTurnComplete: options.onTurnComplete,
       onEvent: (agentId, event) => {
         options.onEvent?.('worker_event', { agentId, event })
       },
@@ -108,6 +111,7 @@ export async function* runCoordinator(
     maxTurns: 3,
     signal: options.signal,
     purpose: 'reason',
+    onTurnComplete: options.onTurnComplete,
   })
 
   let result = await loop.next()

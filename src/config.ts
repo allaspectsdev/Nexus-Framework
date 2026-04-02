@@ -20,6 +20,15 @@ export const configSchema = z.object({
   memoryDir: z.string().default('.nexus/memory'),
   memoryMaxEntries: z.number().int().min(10).max(1000).default(200),
   memoryMaxPromptEntries: z.number().int().min(1).max(50).default(20),
+  // Database
+  dbPath: z.string().default('.nexus/nexus.db'),
+  // MCP client servers
+  mcpServers: z.array(z.object({
+    name: z.string(),
+    command: z.string(),
+    args: z.array(z.string()).default([]),
+    env: z.record(z.string()).optional(),
+  })).default([]),
 })
 
 export type NexusConfig = z.infer<typeof configSchema>
@@ -43,6 +52,8 @@ export function loadConfig(): NexusConfig {
     memoryDir: process.env.MEMORY_DIR || undefined,
     memoryMaxEntries: process.env.MEMORY_MAX_ENTRIES ? parseInt(process.env.MEMORY_MAX_ENTRIES, 10) : undefined,
     memoryMaxPromptEntries: process.env.MEMORY_MAX_PROMPT_ENTRIES ? parseInt(process.env.MEMORY_MAX_PROMPT_ENTRIES, 10) : undefined,
+    dbPath: process.env.DB_PATH || undefined,
+    mcpServers: process.env.MCP_SERVERS ? JSON.parse(process.env.MCP_SERVERS) : undefined,
   }
 
   const result = configSchema.safeParse(raw)
